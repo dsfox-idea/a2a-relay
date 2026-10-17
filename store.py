@@ -1,16 +1,45 @@
-"""On-disk state shared by the gateway process and the TUI process (POSIX only: uses fcntl)."""
+"""On-disk state shared by the gateway process and the TUI process."""
 
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import logging
 import os
+import time
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import IO, Iterator, Optional
 
 logger = logging.getLogger("a2a_relay")
+
+if os.name == "nt":
+    import msvcrt
+
+    def _lock_file(fh: IO) -> None:
+        # msvcrt.locking locks a byte range from the current position; LK_LOCK gives up after
+        # ~10 s, so keep retrying until the holder releases it (as flock(LOCK_EX) would block).
+        fh.seek(0)
+        while True:
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                continue
+
+    def _unlock_file(fh: IO) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _lock_file(fh: IO) -> None:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+
+    def _unlock_file(fh: IO) -> None:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+
+_REPLACE_ATTEMPTS = 50
+_REPLACE_RETRY_SECONDS = 0.02
 
 
 class RelayPaths:
@@ -47,7 +76,16 @@ def write_json_atomic(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    # On Windows the replace fails while another process has the target open for reading.
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(_REPLACE_RETRY_SECONDS)
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -90,7 +128,7 @@ def read_new_records(path: Path, offset: int) -> tuple[list[dict], int]:
 
 
 class SharedState:
-    """``state.json`` guarded by an flock on ``state.lock`` (cross-process read-modify-write)."""
+    """``state.json`` guarded by an exclusive lock on ``state.lock`` (cross-process read-modify-write)."""
 
     def __init__(self, paths: RelayPaths):
         self._paths = paths
@@ -98,8 +136,9 @@ class SharedState:
     @contextlib.contextmanager
     def locked(self) -> Iterator[dict]:
         self._paths.ensure()
-        with self._paths.lock.open("a") as lock_fh:
-            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        # "a+" rather than "a": msvcrt.locking needs a seekable handle positioned at byte 0.
+        with self._paths.lock.open("a+") as lock_fh:
+            _lock_file(lock_fh)
             try:
                 data = self._read()
                 before = json.dumps(data, sort_keys=True)
@@ -107,7 +146,7 @@ class SharedState:
                 if json.dumps(data, sort_keys=True) != before:
                     write_json_atomic(self._paths.state, data)
             finally:
-                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+                _unlock_file(lock_fh)
 
     def _read(self) -> dict:
         try:

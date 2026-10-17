@@ -59,6 +59,60 @@ class StoreTests(unittest.TestCase):
     def test_missing_file(self):
         self.assertEqual(store.read_new_records(Path("/nonexistent/x.jsonl"), 0), ([], 0))
 
+    def test_lock_is_exclusive_across_processes(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = store.RelayPaths(Path(tmp) / "relay", audit=Path(tmp) / "audit.jsonl")
+            child = (
+                "import sys, importlib.util, time\n"
+                f"spec = importlib.util.spec_from_file_location('s', r'{PLUGIN_DIR / 'store.py'}')\n"
+                "s = importlib.util.module_from_spec(spec); spec.loader.exec_module(s)\n"
+                f"paths = s.RelayPaths(s.Path(r'{paths.root}'), audit=s.Path(r'{paths.audit}'))\n"
+                "with s.SharedState(paths).locked() as st:\n"
+                "    print('locked', flush=True); time.sleep(1.5); st['child'] = 1\n"
+            )
+            proc = subprocess.Popen([sys.executable, "-c", child], stdout=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual(proc.stdout.readline().strip(), "locked")
+                started = time.monotonic()
+                with store.SharedState(paths).locked() as state:
+                    waited = time.monotonic() - started
+                    self.assertEqual(state.get("child"), 1)  # we got in only after the child wrote
+                    state["parent"] = 2
+            finally:
+                proc.wait(10)
+                proc.stdout.close()
+            self.assertGreater(waited, 0.5)
+            data = json.loads(paths.state.read_text(encoding="utf-8"))
+            self.assertEqual(data, {"child": 1, "parent": 2})
+
+    def test_atomic_write_retries_while_target_is_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            store.write_json_atomic(path, {"v": 1})
+            reader = path.open("r", encoding="utf-8")
+            threading.Timer(0.2, reader.close).start()
+            store.write_json_atomic(path, {"v": 2})  # on Windows blocked until the reader closes
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"v": 2})
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["state.json"])
+
+
+class PidProbeTests(unittest.TestCase):
+    def test_probe_does_not_harm_a_live_process(self):
+        import subprocess
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)"])
+        try:
+            self.assertTrue(feed_mod._pid_alive(proc.pid))
+            time.sleep(0.5)
+            self.assertIsNone(proc.poll(), "the liveness probe must not stop or signal the process")
+        finally:
+            proc.kill()
+            proc.wait(5)
+        self.assertFalse(feed_mod._pid_alive(proc.pid))
+
+    def test_own_process_is_alive(self):
+        self.assertTrue(feed_mod._pid_alive(os.getpid()))
+
 
 class FeedTests(unittest.TestCase):
     def setUp(self):

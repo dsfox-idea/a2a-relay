@@ -46,7 +46,9 @@ Recommended: give peers time to receive a reply after a late approval. Set
 
 ## Requirements and limits
 
-- POSIX only (uses `fcntl` for the cross-process lock); not tested on Windows.
+- macOS, Linux and Windows. The cross-process lock is `fcntl.flock` on POSIX and
+  `msvcrt.locking` on Windows; on Windows the owner-liveness check uses `OpenProcess`, never
+  `os.kill(pid, 0)` (signal 0 is `CTRL_C_EVENT` there and would interrupt the process).
 - Requires the bundled `a2a` platform plugin and the Ink TUI (`hermes --tui`).
 - Each machine sees only its own inbound traffic.
 - Only prompts that reach a human are relayed: with `approvals.mode: smart` the guardian model
