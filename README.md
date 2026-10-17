@@ -36,6 +36,9 @@ hermes plugins enable a2a-relay --no-allow-tool-override
 hermes config set plugins.entries.a2a-relay.allow_gateway_injection true
 ```
 
+On Windows a symlink needs Developer Mode or admin rights; a directory junction does not
+(PowerShell): `New-Item -ItemType Junction -Path "$env:LOCALAPPDATA\hermes\plugins\a2a-relay" -Target <clone>`.
+
 Then restart the TUI chat that should receive the feed. The running gateway reloads plugins on
 `enable`; if it does not, restart it.
 
@@ -59,8 +62,11 @@ Recommended: give peers time to receive a reply after a late approval. Set
 
 ```bash
 cd ~/.hermes/hermes-agent   # tests import Hermes modules
-<hermes python> -m unittest discover -s ~/dev/a2a-relay/tests -v
+hermes --run-module unittest discover -s ~/dev/a2a-relay/tests -v
 ```
+
+`hermes --run-module` uses Hermes' own interpreter and dependencies; a bare bundled `python3`
+lacks them and fails on import.
 
 ## License
 
