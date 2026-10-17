@@ -14,6 +14,7 @@ import threading
 
 from .approvals import ALLOW, DENY, ApprovalBridge, DecisionDesk
 from .feed import TUI_PLATFORMS, FeedRelay
+from .identity import SECTION_ID, MachineIdentity
 from .replies import ReplyInterpreter
 from .store import RelayPaths
 
@@ -57,6 +58,7 @@ def register(ctx) -> None:
         if tool_name in _A2A_TOOLS and is_tui_process():
             feed.note_own_call(False)
 
+    ctx.register_system_prompt_section(SECTION_ID, MachineIdentity().render)
     ctx.register_hook("pre_approval_request", bridge.on_pre_approval_request)
     ctx.register_hook("post_approval_response", bridge.on_post_approval_response)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)

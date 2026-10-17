@@ -224,6 +224,9 @@ class RegisterTests(unittest.TestCase):
             def register_hook(self, *a):
                 pass
 
+            def register_system_prompt_section(self, section_id, content, **kw):
+                self.sections = {section_id: content}
+
             def register_command(self, name, handler, **kw):
                 self.commands[name] = handler
 
@@ -243,6 +246,28 @@ class RegisterTests(unittest.TestCase):
             state = json.loads((Path(tmp) / "a2a_relay" / "state.json").read_text())
             self.assertEqual(state["owner"]["session_key"], "20261017_x")
             self.assertEqual(state["owner"]["pid"], os.getpid())
+
+
+class IdentityTests(unittest.TestCase):
+    identity = sys.modules["a2a_relay_under_test.identity"]
+
+    def test_host_node_and_project_profile(self):
+        text = self.identity.MachineIdentity(lambda: "macbook-pro-m4", {"A2A_AGENT_NAME": "m4"}).render(
+            {"profile_name": "growser"})
+        self.assertIn("host 'macbook-pro-m4', A2A node name 'm4', Hermes profile 'growser'.", text)
+        self.assertIn("overrides any memory entry", text)
+
+    def test_default_profile_and_no_node(self):
+        text = self.identity.MachineIdentity(lambda: "dsfox-pc2", {}).render({"profile_name": "default"})
+        self.assertIn("you run on host 'dsfox-pc2'.", text)
+        self.assertNotIn("A2A node", text)
+        self.assertNotIn("profile", text.split("\n")[0])
+
+    def test_section_is_valid_for_the_host(self):
+        from hermes_cli.plugins_dispatch import MAX_SYSTEM_PROMPT_SECTION_CHARS
+        from hermes_cli.plugins import is_valid_system_prompt_section_id
+        self.assertTrue(is_valid_system_prompt_section_id(self.identity.SECTION_ID))
+        self.assertLess(len(self.identity.MachineIdentity().render({})), MAX_SYSTEM_PROMPT_SECTION_CHARS)
 
 
 class ApprovalIntegrationTests(unittest.TestCase):
