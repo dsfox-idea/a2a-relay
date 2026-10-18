@@ -123,9 +123,9 @@ class FeedTests(unittest.TestCase):
         _append(self.paths.audit, {"direction": "inbound", "peer": "win", "task_id": "task-old", "summary": "old"})
         self.sent: list[tuple[str, str]] = []
         self.clock = Clock()
-        self.feed = feed_mod.FeedRelay(self.paths, inject=self._inject, is_tui_process=lambda: True,
+        self.feed = feed_mod.FeedRelay(self.paths, inject=self._inject, can_inject=lambda: True,
                                        clock=self.clock, pid=os.getpid())
-        self.feed.on_pre_llm_call(session_id="sess-1", platform="tui")
+        self.feed.claim_chat("sess-1")
         self.assertFalse(self.feed.poll_once())  # first claim only records offsets
 
     def tearDown(self):
@@ -193,7 +193,7 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 2)
 
     def test_live_other_owner_blocks_claim(self):
-        other = feed_mod.FeedRelay(self.paths, inject=self._inject, is_tui_process=lambda: True,
+        other = feed_mod.FeedRelay(self.paths, inject=self._inject, can_inject=lambda: True,
                                    clock=self.clock, pid=os.getppid())
         with store.SharedState(self.paths).locked() as state:
             state["owner"] = {"pid": os.getppid(), "session_key": "s2"}
@@ -202,50 +202,111 @@ class FeedTests(unittest.TestCase):
         self.assertTrue(other._claim("s2"))
 
     def test_non_tui_process_does_nothing(self):
-        gateway_feed = feed_mod.FeedRelay(self.paths, inject=self._inject, is_tui_process=lambda: False,
+        gateway_feed = feed_mod.FeedRelay(self.paths, inject=self._inject, can_inject=lambda: False,
                                           clock=self.clock)
-        gateway_feed.on_pre_llm_call(session_id="agent:main:a2a:dm:ctx-1", platform="a2a")
+        gateway_feed.claim_chat("agent:main:a2a:dm:ctx-1")
         self.assertFalse(gateway_feed.poll_once())
 
 
+class _Ctx:
+    """Minimal PluginContext double: records hooks/commands, injection always accepted."""
+
+    def __init__(self, tui_host: bool, gateway_host: bool):
+        self._manager = type("Manager", (), {"has_tui_message_injector": tui_host,
+                                             "has_gateway_message_injector": gateway_host})()
+        self.commands: dict = {}
+        self.hooks: dict = {}
+        self.injected: list = []
+
+    def register_hook(self, name, fn):
+        self.hooks[name] = fn
+
+    def register_system_prompt_section(self, section_id, content, **kw):
+        pass
+
+    def register_command(self, name, handler, **kw):
+        self.commands[name] = handler
+
+    def inject_message(self, text, session_key=None, **kw):
+        self.injected.append((session_key, text))
+        return True
+
+
 class RegisterTests(unittest.TestCase):
-    """The slash-command path must claim the chat with the session vars the TUI actually binds."""
+    """Which turns claim the feed, on both hosts (separate TUI process, gateway-served local chat)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["HERMES_HOME"] = self.tmp.name
+        self.state_path = Path(self.tmp.name) / "a2a_relay" / "state.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _owner(self):
+        if not self.state_path.exists():
+            return None
+        return json.loads(self.state_path.read_text(encoding="utf-8")).get("owner", {}).get("session_key")
+
+    def _turn(self, ctx, agent_platform, session_id, **session_vars):
+        from gateway.session_context import clear_session_vars, set_session_vars
+        tokens = set_session_vars(**session_vars)
+        try:
+            return ctx.hooks["pre_llm_call"](user_message="hi", platform=agent_platform, session_id=session_id)
+        finally:
+            clear_session_vars(tokens)
 
     def test_slash_command_claims_tui_chat(self):
         from gateway.session_context import clear_session_vars, set_session_vars
+        ctx = _Ctx(tui_host=True, gateway_host=False)
+        pkg.register(ctx)
+        # Same binding as tui_gateway.server._set_session_context: source, no platform.
+        tokens = set_session_vars(session_key="20261017_x", session_id="20261017_x", source="tui")
+        try:
+            ctx.commands["a2a-pending"]("")
+        finally:
+            clear_session_vars(tokens)
+        self.assertEqual(self._owner(), "20261017_x")
 
-        class Manager:
-            has_tui_message_injector = True
+    def test_tui_turn_claims_by_session_id(self):
+        ctx = _Ctx(tui_host=True, gateway_host=False)
+        pkg.register(ctx)
+        self._turn(ctx, "tui", "20261018_tui")
+        self.assertEqual(self._owner(), "20261018_tui")
 
-        class Ctx:
-            _manager = Manager()
-            commands: dict = {}
+    def test_gateway_local_chat_claims_by_gateway_session_key(self):
+        # Windows: the gateway serves the TUI chat; the agent says "tui", the session context says "local".
+        ctx = _Ctx(tui_host=False, gateway_host=True)
+        pkg.register(ctx)
+        key = "agent:main:local:dm:local-a053"
+        self._turn(ctx, "tui", "local-a053", platform="local", session_key=key)
+        self.assertEqual(self._owner(), key)
 
-            def register_hook(self, *a):
-                pass
+    def test_gateway_a2a_and_messaging_sessions_are_never_claimed(self):
+        ctx = _Ctx(tui_host=False, gateway_host=True)
+        pkg.register(ctx)
+        self._turn(ctx, "a2a", "s1", platform="a2a", session_key="agent:main:a2a:dm:ctx-1")
+        self._turn(ctx, "telegram", "s2", platform="telegram", session_key="agent:main:telegram:dm:1")
+        self._turn(ctx, "tui", "s3", platform="local", session_key="agent:main:a2a:dm:forged")
+        self.assertIsNone(self._owner())
 
-            def register_system_prompt_section(self, section_id, content, **kw):
-                self.sections = {section_id: content}
+    def test_tui_platform_without_tui_host_and_no_local_context_is_ignored(self):
+        ctx = _Ctx(tui_host=False, gateway_host=True)
+        pkg.register(ctx)
+        self._turn(ctx, "tui", "20261018_x")
+        self.assertIsNone(self._owner())
 
-            def register_command(self, name, handler, **kw):
-                self.commands[name] = handler
-
-            def inject_message(self, *a, **kw):
-                return True
-
-        with tempfile.TemporaryDirectory() as tmp:
-            os.environ["HERMES_HOME"] = tmp
-            ctx = Ctx()
-            pkg.register(ctx)
-            # Same binding as tui_gateway.server._set_session_context: source, no platform.
-            tokens = set_session_vars(session_key="20261017_x", session_id="20261017_x", source="tui")
-            try:
-                ctx.commands["a2a-pending"]("")
-            finally:
-                clear_session_vars(tokens)
-            state = json.loads((Path(tmp) / "a2a_relay" / "state.json").read_text())
-            self.assertEqual(state["owner"]["session_key"], "20261017_x")
-            self.assertEqual(state["owner"]["pid"], os.getpid())
+    def test_own_a2a_call_is_tracked_by_session_id_in_a_local_chat(self):
+        ctx = _Ctx(tui_host=False, gateway_host=True)
+        pkg.register(ctx)
+        self._turn(ctx, "tui", "local-a053", platform="local", session_key="agent:main:local:dm:local-a053")
+        feed = next(c.cell_contents for c in ctx.hooks["pre_tool_call"].__closure__
+                    if isinstance(c.cell_contents, feed_mod.FeedRelay))
+        ctx.hooks["pre_tool_call"](tool_name="a2a_call", session_id="local-a053")
+        ctx.hooks["pre_tool_call"](tool_name="a2a_call", session_id="agent-a2a-session")  # not an owner chat
+        self.assertEqual(feed._own_calls, 1)
+        ctx.hooks["post_tool_call"](tool_name="a2a_call", session_id="local-a053")
+        self.assertEqual(feed._own_calls, 0)
 
 
 class IdentityTests(unittest.TestCase):

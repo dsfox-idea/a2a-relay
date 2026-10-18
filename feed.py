@@ -13,7 +13,6 @@ from .store import RelayPaths, SharedState, file_size, read_new_records
 
 logger = logging.getLogger("a2a_relay")
 
-TUI_PLATFORMS = frozenset({"tui", "desktop"})
 _QUIET_SECONDS = 3.0         # flush once no new record arrived for this long...
 _REPLY_WAIT_SECONDS = 20.0   # ...but hold an unanswered inbound task this long to merge its reply
 _MAX_INBOUND_IDS = 300
@@ -70,16 +69,16 @@ def _short(text: str, limit: int = 500) -> str:
 
 
 class FeedRelay:
-    """One instance per process; only the process owning the most recently active TUI chat claims records."""
+    """One instance per process; only the process owning the most recently active owner chat claims records."""
 
-    def __init__(self, paths: RelayPaths, inject: Callable[[str, str], bool], is_tui_process: Callable[[], bool],
+    def __init__(self, paths: RelayPaths, inject: Callable[[str, str], bool], can_inject: Callable[[], bool],
                  clock: Callable[[], float] = time.time, pid: Optional[int] = None,
                  on_asked: Optional[Callable[[list], None]] = None):
         self._paths = paths
         self._state = SharedState(paths)
         self._inject = inject
         self._on_asked = on_asked or (lambda ids: None)
-        self._is_tui_process = is_tui_process
+        self._can_inject = can_inject
         self._clock = clock
         self._pid = pid if pid is not None else os.getpid()
         self._lock = threading.Lock()
@@ -90,13 +89,14 @@ class FeedRelay:
         self._node = os.getenv("A2A_AGENT_NAME") or "эта машина"
 
     # -- hooks -------------------------------------------------------------------------------
-    def on_pre_llm_call(self, session_id: str = "", platform: str = "", **_: object) -> None:
-        if platform not in TUI_PLATFORMS or not session_id or not self._is_tui_process():
+    def claim_chat(self, session_key: str) -> None:
+        """Make this owner chat (its injection key) the feed target; "" is ignored."""
+        if not session_key or not self._can_inject():
             return
         with self._lock:
-            self._session_key = session_id
+            self._session_key = session_key
         with self._state.locked() as state:
-            state["owner"] = {"pid": self._pid, "session_key": session_id, "ts": self._clock()}
+            state["owner"] = {"pid": self._pid, "session_key": session_key, "ts": self._clock()}
 
     def note_own_call(self, started: bool) -> None:
         """An a2a_* tool call from this chat is in flight: its audit record is already visible here."""
@@ -113,7 +113,7 @@ class FeedRelay:
 
     def poll_once(self) -> bool:
         """Claim new records if this process owns the feed, flush when due. True when a message was injected."""
-        if not self._is_tui_process():
+        if not self._can_inject():
             return False
         with self._lock:
             session_key = self._session_key

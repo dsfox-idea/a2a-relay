@@ -13,7 +13,8 @@ import logging
 import threading
 
 from .approvals import ALLOW, DENY, ApprovalBridge, DecisionDesk
-from .feed import TUI_PLATFORMS, FeedRelay
+from .chats import OwnerChats
+from .feed import FeedRelay
 from .identity import SECTION_ID, MachineIdentity
 from .replies import ReplyInterpreter
 from .store import RelayPaths
@@ -30,8 +31,8 @@ def register(ctx) -> None:
     paths.ensure()
     manager = ctx._manager
 
-    def is_tui_process() -> bool:
-        return bool(manager.has_tui_message_injector)
+    chats = OwnerChats(has_tui_host=lambda: bool(manager.has_tui_message_injector),
+                       has_gateway_host=lambda: bool(manager.has_gateway_message_injector))
 
     def inject(session_key: str, text: str) -> bool:
         return bool(ctx.inject_message(text, session_key=session_key))
@@ -39,23 +40,24 @@ def register(ctx) -> None:
     bridge = ApprovalBridge(paths)
     desk = DecisionDesk(paths)
     replies = ReplyInterpreter(desk)
-    feed = FeedRelay(paths, inject=inject, is_tui_process=is_tui_process, on_asked=replies.note_asked)
+    feed = FeedRelay(paths, inject=inject, can_inject=chats.can_inject, on_asked=replies.note_asked)
 
-    def on_pre_llm_call(user_message=None, platform: str = "", **kwargs):
-        feed.on_pre_llm_call(platform=platform, **kwargs)
+    def on_pre_llm_call(user_message=None, platform: str = "", session_id: str = "", **_):
+        key = chats.key_for_turn(platform, session_id)
+        if not key:
+            return None
+        chats.remember(session_id)
+        feed.claim_chat(key)
         _ensure_poller(feed)
-        if platform in TUI_PLATFORMS and is_tui_process():
-            context = replies.on_user_message(user_message)
-            if context:
-                return {"context": context}
-        return None
+        context = replies.on_user_message(user_message if isinstance(user_message, str) else "")
+        return {"context": context} if context else None
 
-    def on_pre_tool_call(tool_name: str = "", **_):
-        if tool_name in _A2A_TOOLS and is_tui_process():
+    def on_pre_tool_call(tool_name: str = "", session_id: str = "", **_):
+        if tool_name in _A2A_TOOLS and chats.is_owner_session(session_id):
             feed.note_own_call(True)
 
-    def on_post_tool_call(tool_name: str = "", **_):
-        if tool_name in _A2A_TOOLS and is_tui_process():
+    def on_post_tool_call(tool_name: str = "", session_id: str = "", **_):
+        if tool_name in _A2A_TOOLS and chats.is_owner_session(session_id):
             feed.note_own_call(False)
 
     ctx.register_system_prompt_section(SECTION_ID, MachineIdentity().render)
@@ -70,8 +72,10 @@ def register(ctx) -> None:
             from gateway.session_context import get_session_env
             # The TUI binds only ``source`` (not ``platform``) around slash-command handlers.
             platform = get_session_env("HERMES_SESSION_PLATFORM", "") or get_session_env("HERMES_SESSION_SOURCE", "")
-            feed.on_pre_llm_call(session_id=get_session_env("HERMES_SESSION_KEY", ""), platform=platform)
-            _ensure_poller(feed)
+            key = chats.key_for_turn(platform, get_session_env("HERMES_SESSION_KEY", ""))
+            if key:
+                feed.claim_chat(key)
+                _ensure_poller(feed)
         except Exception:
             logger.warning("a2a-relay: could not claim the chat from a slash command", exc_info=True)
 
