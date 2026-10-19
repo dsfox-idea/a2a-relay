@@ -224,6 +224,9 @@ class _Ctx:
     def register_system_prompt_section(self, section_id, content, **kw):
         pass
 
+    def register_cli_command(self, **kw):
+        self.cli = kw
+
     def register_command(self, name, handler, **kw):
         self.commands[name] = handler
 

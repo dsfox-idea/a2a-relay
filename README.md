@@ -29,23 +29,25 @@ prompt goes nowhere: the A2A adapter drops non-final sends, and the command is d
 
 ## Install
 
+On every machine (macOS, Linux, Windows), with A2A already set up between them:
+
 ```bash
-git clone https://github.com/dsfox-idea/a2a-relay ~/dev/a2a-relay
-ln -s ~/dev/a2a-relay ~/.hermes/plugins/a2a-relay
-hermes plugins enable a2a-relay --no-allow-tool-override
-hermes config set plugins.entries.a2a-relay.allow_gateway_injection true
+hermes plugins install dsfox-idea/a2a-relay --enable
+hermes a2a-relay setup      # shows the fixes, asks once, backs up config.yaml, applies them
+hermes gateway restart      # from a separate terminal, not from inside an agent session
+hermes a2a-relay doctor     # read-only; every failed check prints the command that fixes it
 ```
 
-On Windows a symlink needs Developer Mode or admin rights; a directory junction does not
-(PowerShell): `New-Item -ItemType Junction -Path "$env:LOCALAPPDATA\hermes\plugins\a2a-relay" -Target <clone>`.
+`doctor` checks: the plugin is enabled and may inject into your chat; the A2A platform is on; the
+node has a name; inbound peers have tokens and are trusted; inbound A2A sessions can call other
+peers (`a2a` toolset on the `a2a` platform); `A2A_REPLY_TIMEOUT` and each peer's
+`a2a_agents.<peer>.timeout` outlast `approvals.timeout`, so a late human approval still reaches
+the caller; each configured peer is reachable and accepts its token; the Hermes build can deliver
+into chats the gateway serves itself (the Windows TUI); every profile has the plugin too. Run it
+per profile with `hermes -p <profile> a2a-relay doctor`. Tokens are never printed.
 
-Then restart the TUI chat that should receive the feed. The running gateway reloads plugins on
-`enable`; if it does not, restart it.
-
-Recommended: give peers time to receive a reply after a late approval. Set
-`A2A_REPLY_TIMEOUT=900` in `~/.hermes/.env` (gateway restart required) and
-`a2a_agents.<this-node>.timeout: 900` on each calling peer, so the A2A wait outlasts
-`approvals.timeout` (300 s by default).
+For development, a clone linked into `~/.hermes/plugins/a2a-relay` works as well (on Windows use a
+directory junction: a symlink needs admin rights).
 
 ## Requirements and limits
 

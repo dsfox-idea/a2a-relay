@@ -14,6 +14,7 @@ import threading
 
 from .approvals import ALLOW, DENY, ApprovalBridge, DecisionDesk
 from .chats import OwnerChats
+from .cli import build_parser, command as cli_command
 from .feed import FeedRelay
 from .identity import SECTION_ID, MachineIdentity
 from .replies import ReplyInterpreter
@@ -60,6 +61,9 @@ def register(ctx) -> None:
         if tool_name in _A2A_TOOLS and chats.is_owner_session(session_id):
             feed.note_own_call(False)
 
+    ctx.register_cli_command(name="a2a-relay", help="Check and set up A2A between your machines",
+                             setup_fn=build_parser, handler_fn=cli_command,
+                             description="doctor: read-only checks with exact fix commands; setup: apply them.")
     ctx.register_system_prompt_section(SECTION_ID, MachineIdentity().render)
     ctx.register_hook("pre_approval_request", bridge.on_pre_approval_request)
     ctx.register_hook("post_approval_response", bridge.on_post_approval_response)
