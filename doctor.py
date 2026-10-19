@@ -42,7 +42,8 @@ class HostFacts:
     def __init__(self, config: Mapping[str, Any], env: Callable[[str], Optional[str]],
                  a2a_platform_toolsets: set[str], profile_dirs: Mapping[str, Path],
                  has_local_injection_fix: bool, hostname: str,
-                 http_get: Callable[[str, Mapping[str, str]], tuple[int, Any]]):
+                 http_get: Callable[[str, Mapping[str, str]], tuple[int, Any]],
+                 profile: str = "default", default_routes: Optional[Mapping[str, Any]] = None):
         self.config = config
         self.env = env
         self.a2a_platform_toolsets = a2a_platform_toolsets
@@ -50,6 +51,9 @@ class HostFacts:
         self.has_local_injection_fix = has_local_injection_fix
         self.hostname = hostname
         self.http_get = http_get
+        # A non-default profile serves inbound A2A through the default gateway's /<profile>/ route.
+        self.profile = profile
+        self.default_routes = default_routes or {}
 
     @classmethod
     def live(cls) -> "HostFacts":
@@ -61,16 +65,27 @@ class HostFacts:
         except Exception:
             toolsets = set((config.get("platform_toolsets") or {}).get("a2a") or [])
         try:
-            from hermes_cli.profiles import get_profile_dir, list_profiles
+            from hermes_cli.profiles import get_active_profile_name, get_profile_dir, list_profiles
+            profile = get_active_profile_name()
             profiles = {p.name: get_profile_dir(p.name) for p in list_profiles() if p.name != "default"}
+            routes = _default_profile_routes(get_profile_dir("default")) if profile != "default" else {}
         except Exception:
-            profiles = {}
+            profile, profiles, routes = "default", {}, {}
         try:
             from gateway.run_plugin_injection import GatewayPluginInjectionMixin
             fix = hasattr(GatewayPluginInjectionMixin, "_dispatch_plugin_local_injection")
         except Exception:
             fix = False
-        return cls(config, get_env_value, toolsets, profiles, fix, socket.gethostname(), _http_get)
+        return cls(config, get_env_value, toolsets, profiles, fix, socket.gethostname(), _http_get,
+                   profile=profile, default_routes=routes)
+
+
+def _default_profile_routes(default_home: Path) -> Mapping[str, Any]:
+    """``platforms.a2a.extra.agents`` of the default profile (read-only YAML parse)."""
+    from ruamel.yaml import YAML
+    with (Path(default_home) / "config.yaml").open(encoding="utf-8") as fh:
+        data = YAML(typ="safe").load(fh) or {}
+    return ((((data.get("platforms") or {}).get("a2a") or {}).get("extra") or {}).get("agents") or {})
 
 
 def _http_get(url: str, headers: Mapping[str, str]) -> tuple[int, Any]:
@@ -104,14 +119,33 @@ class Doctor:
         self.approval_timeout = _int((cfg.get("approvals") or {}).get("timeout"), DEFAULT_APPROVAL_TIMEOUT)
         self.timeout_target = max(REPLY_TIMEOUT_TARGET, self.approval_timeout + 60)
 
+    @property
+    def is_default_profile(self) -> bool:
+        return self.facts.profile == "default"
+
     def run(self, probe_peers: bool = True) -> list[Check]:
-        checks = [self.plugin_enabled(), self.gateway_injection(), self.a2a_platform(), self.node_name(),
-                  self.inbound_auth(), self.a2a_toolset(), self.reply_timeout(), self.peer_timeouts(),
-                  self.local_injection_fix()]
+        checks = [self.plugin_enabled(), self.gateway_injection()]
+        if self.is_default_profile:
+            checks += [self.a2a_platform(), self.node_name(), self.inbound_auth(), self.reply_timeout()]
+        else:
+            checks.append(self.profile_route())
+        checks += [self.a2a_toolset(), self.peer_timeouts(), self.local_injection_fix()]
         if probe_peers:
             checks.extend(self.peers())
-        checks.extend(self.profiles())
+        if self.is_default_profile:
+            checks.extend(self.profiles())
         return checks
+
+    def profile_route(self) -> Check:
+        """Inbound server settings (port, tokens, trusted peers, reply timeout) belong to the default
+        profile; this profile only needs a route there."""
+        name = self.facts.profile
+        routed = ((self.facts.default_routes.get(name) or {}).get("profile")) == name
+        return Check("reachable over A2A", OK if routed else FAIL,
+                     f"through the default gateway at /{name}/" if routed else
+                     f"the default profile has no A2A route to this profile",
+                     [] if routed else [["-p", "default", "config", "set",
+                                         f"platforms.a2a.extra.agents.{name}.profile", name]], restart=True)
 
     # -- plugin --------------------------------------------------------------------------------
     def plugin_enabled(self) -> Check:

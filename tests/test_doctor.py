@@ -124,6 +124,29 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(check.fixes, [["update", "--set-channel", "main"], ["update"]])
 
 
+class ProfileTests(unittest.TestCase):
+    """A non-default profile: inbound server settings live in the default profile, only the route counts."""
+
+    def profile_facts(self, routes):
+        f = facts(env={}, profiles={"growser": Path("/nonexistent")})
+        f.profile, f.default_routes = "growser", routes
+        return f
+
+    def test_routed_profile_skips_server_checks(self):
+        checks = by_name(doctor.Doctor(self.profile_facts({"growser": {"profile": "growser"}})).run())
+        self.assertEqual(checks["reachable over A2A"].status, "ok")
+        for server_only in ("A2A platform enabled", "A2A node name", "inbound peers", "reply outlasts an approval",
+                            "profile growser"):
+            self.assertNotIn(server_only, checks)
+        self.assertEqual([c.name for c in checks.values() if c.status != "ok"], [])
+
+    def test_unrouted_profile_gets_the_route_command(self):
+        check = by_name(doctor.Doctor(self.profile_facts({})).run())["reachable over A2A"]
+        self.assertTrue(check.failed)
+        self.assertEqual(check.fixes, [["-p", "default", "config", "set",
+                                        "platforms.a2a.extra.agents.growser.profile", "growser"]])
+
+
 class SetupTests(unittest.TestCase):
     def setUp(self):
         self._live = doctor.HostFacts.live
