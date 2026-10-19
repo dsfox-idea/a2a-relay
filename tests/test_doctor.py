@@ -114,10 +114,20 @@ class DoctorTests(unittest.TestCase):
             bare, cloned, ready = Path(tmp) / "growser", Path(tmp) / "cloned", Path(tmp) / "other"
             for home in (cloned, ready):
                 (home / "plugins" / "a2a-relay").mkdir(parents=True)
-            (ready / "config.yaml").write_text("plugins:\n  enabled: [a2a-relay]\n", encoding="utf-8")
+            stale = Path(tmp) / "stale"
+            (stale / "plugins" / "a2a-relay").mkdir(parents=True)
+            for home in (ready, stale):
+                (home / "config.yaml").write_text("plugins:\n  enabled: [a2a-relay]\n", encoding="utf-8")
+            (ready / "plugins" / "a2a-relay" / "plugin.yaml").write_text(
+                f"name: a2a-relay\nversion: {doctor.OWN_VERSION}\n", encoding="utf-8")
+            (stale / "plugins" / "a2a-relay" / "plugin.yaml").write_text("name: a2a-relay\nversion: 0.1.0\n",
+                                                                       encoding="utf-8")
             (cloned / "config.yaml").write_text("plugins:\n  enabled: [memsync]\n", encoding="utf-8")
             checks = by_name(doctor.Doctor(facts(profiles={"growser": bare, "cloned": cloned,
-                                                          "other": ready})).run())
+                                                          "other": ready, "stale": stale})).run())
+        # A plain copy left by `profile create --clone` (seen on m4): it never gets the new modules.
+        self.assertIn("outdated copy", checks["profile stale"].detail)
+        self.assertIn("--force", checks["profile stale"].fixes[0])
         self.assertEqual(checks["profile growser"].status, "warn")
         self.assertEqual(checks["profile growser"].fixes[0][:4], ["-p", "growser", "plugins", "install"])
         # Copied by `profile create --clone` but never enabled there (seen on m4).

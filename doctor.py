@@ -103,6 +103,20 @@ def _plugin_enabled_in(home: Path) -> bool:
     return PLUGIN in ((_read_profile_config(home).get("plugins") or {}).get("enabled") or [])
 
 
+def plugin_version(plugin_dir: Path) -> str:
+    """``version`` from a plugin.yaml; "" when absent."""
+    try:
+        for line in (Path(plugin_dir) / "plugin.yaml").read_text(encoding="utf-8").splitlines():
+            if line.startswith("version:"):
+                return line.split(":", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return ""
+
+
+OWN_VERSION = plugin_version(Path(__file__).resolve().parent)
+
+
 def _http_get(url: str, headers: Mapping[str, str]) -> tuple[int, Any]:
     request = urllib.request.Request(url, headers=dict(headers))
     try:
@@ -267,8 +281,17 @@ class Doctor:
     def profiles(self) -> list[Check]:
         checks = []
         for name, directory in sorted(self.facts.profile_dirs.items()):
-            installed = (Path(directory) / "plugins" / PLUGIN).exists()
+            plugin_dir = Path(directory) / "plugins" / PLUGIN
+            installed = plugin_dir.exists()
             enabled = installed and self.facts.plugin_enabled_in(Path(directory))
+            version = plugin_version(plugin_dir) if installed else ""
+            if enabled and version != OWN_VERSION:
+                checks.append(Check(f"profile {name}", WARN,
+                                    f"outdated copy of the plugin ({version or 'no version'}, this one is "
+                                    f"{OWN_VERSION})",
+                                    [["-p", name, "plugins", "install", INSTALL_SOURCE, "--force", "--enable"]],
+                                    restart=True))
+                continue
             if enabled:
                 checks.append(Check(f"profile {name}", OK, f"then run: hermes -p {name} a2a-relay doctor"))
                 continue
