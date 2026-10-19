@@ -111,11 +111,19 @@ class DoctorTests(unittest.TestCase):
 
     def test_profile_without_the_plugin_is_flagged(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bare, ready = Path(tmp) / "growser", Path(tmp) / "other"
-            (ready / "plugins" / "a2a-relay").mkdir(parents=True)
-            checks = by_name(doctor.Doctor(facts(profiles={"growser": bare, "other": ready})).run())
+            bare, cloned, ready = Path(tmp) / "growser", Path(tmp) / "cloned", Path(tmp) / "other"
+            for home in (cloned, ready):
+                (home / "plugins" / "a2a-relay").mkdir(parents=True)
+            (ready / "config.yaml").write_text("plugins:\n  enabled: [a2a-relay]\n", encoding="utf-8")
+            (cloned / "config.yaml").write_text("plugins:\n  enabled: [memsync]\n", encoding="utf-8")
+            checks = by_name(doctor.Doctor(facts(profiles={"growser": bare, "cloned": cloned,
+                                                          "other": ready})).run())
         self.assertEqual(checks["profile growser"].status, "warn")
-        self.assertEqual(checks["profile growser"].fixes[0][:3], ["-p", "growser", "plugins"])
+        self.assertEqual(checks["profile growser"].fixes[0][:4], ["-p", "growser", "plugins", "install"])
+        # Copied by `profile create --clone` but never enabled there (seen on m4).
+        self.assertEqual(checks["profile cloned"].status, "warn")
+        self.assertIn("installed but not enabled", checks["profile cloned"].detail)
+        self.assertEqual(checks["profile cloned"].fixes[0][:4], ["-p", "cloned", "plugins", "enable"])
         self.assertEqual(checks["profile other"].status, "ok")
 
     def test_old_hermes_build_is_a_warning_with_update_commands(self):

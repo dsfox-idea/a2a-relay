@@ -54,6 +54,7 @@ class HostFacts:
         # A non-default profile serves inbound A2A through the default gateway's /<profile>/ route.
         self.profile = profile
         self.default_routes = default_routes or {}
+        self.plugin_enabled_in: Callable[[Path], bool] = _plugin_enabled_in
 
     @classmethod
     def live(cls) -> "HostFacts":
@@ -80,12 +81,26 @@ class HostFacts:
                    profile=profile, default_routes=routes)
 
 
+def _read_profile_config(home: Path) -> Mapping[str, Any]:
+    """Another profile's config.yaml, read-only; {} when absent or unreadable."""
+    try:
+        from ruamel.yaml import YAML
+        with (Path(home) / "config.yaml").open(encoding="utf-8") as fh:
+            return YAML(typ="safe").load(fh) or {}
+    except (OSError, ImportError, ValueError):
+        return {}
+    except Exception:  # ruamel parse errors do not share one base class with ValueError
+        return {}
+
+
 def _default_profile_routes(default_home: Path) -> Mapping[str, Any]:
-    """``platforms.a2a.extra.agents`` of the default profile (read-only YAML parse)."""
-    from ruamel.yaml import YAML
-    with (Path(default_home) / "config.yaml").open(encoding="utf-8") as fh:
-        data = YAML(typ="safe").load(fh) or {}
+    """``platforms.a2a.extra.agents`` of the default profile."""
+    data = _read_profile_config(default_home)
     return ((((data.get("platforms") or {}).get("a2a") or {}).get("extra") or {}).get("agents") or {})
+
+
+def _plugin_enabled_in(home: Path) -> bool:
+    return PLUGIN in ((_read_profile_config(home).get("plugins") or {}).get("enabled") or [])
 
 
 def _http_get(url: str, headers: Mapping[str, str]) -> tuple[int, Any]:
@@ -253,14 +268,18 @@ class Doctor:
         checks = []
         for name, directory in sorted(self.facts.profile_dirs.items()):
             installed = (Path(directory) / "plugins" / PLUGIN).exists()
-            checks.append(Check(f"profile {name}", OK if installed else WARN,
-                                f"then run: hermes -p {name} a2a-relay doctor" if installed else
-                                "plugin not installed: A2A sessions of this profile get no identity line "
-                                "and their approvals never reach a chat",
-                                [] if installed else [["-p", name, "plugins", "install", INSTALL_SOURCE, "--enable"],
-                                                      ["-p", name, "config", "set",
-                                                       f"plugins.entries.{PLUGIN}.allow_gateway_injection", "true"]],
-                                restart=True))
+            enabled = installed and self.facts.plugin_enabled_in(Path(directory))
+            if enabled:
+                checks.append(Check(f"profile {name}", OK, f"then run: hermes -p {name} a2a-relay doctor"))
+                continue
+            fixes = [] if installed else [["-p", name, "plugins", "install", INSTALL_SOURCE, "--enable"]]
+            if installed:
+                fixes.append(["-p", name, "plugins", "enable", PLUGIN, "--no-allow-tool-override"])
+            fixes.append(["-p", name, "config", "set", f"plugins.entries.{PLUGIN}.allow_gateway_injection", "true"])
+            checks.append(Check(f"profile {name}", WARN,
+                                ("plugin installed but not enabled" if installed else "plugin not installed")
+                                + ": A2A sessions of this profile get no identity line and their approvals "
+                                  "never reach a chat", fixes, restart=True))
         return checks
 
 
