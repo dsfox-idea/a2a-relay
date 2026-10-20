@@ -227,6 +227,9 @@ class _Ctx:
     def register_cli_command(self, **kw):
         self.cli = kw
 
+    def register_tool(self, name, **kw):
+        pass
+
     def register_command(self, name, handler, **kw):
         self.commands[name] = handler
 

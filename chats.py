@@ -31,17 +31,23 @@ class OwnerChats:
         self._has_tui_host = has_tui_host
         self._has_gateway_host = has_gateway_host
         self._env = session_env
-        # Agent session ids seen in owner-chat turns: tool hooks get only the session id, not the platform.
-        self._owner_session_ids: dict[str, None] = {}
+        # Agent session id -> injection key, for owner-chat turns: tool hooks and tool handlers get only
+        # the session id, not the platform.
+        self._owner_sessions: dict[str, str] = {}
 
-    def remember(self, session_id: str) -> None:
+    def remember(self, session_id: str, key: str = "") -> None:
         if session_id:
-            self._owner_session_ids[session_id] = None
-            while len(self._owner_session_ids) > self._MAX_REMEMBERED:
-                self._owner_session_ids.pop(next(iter(self._owner_session_ids)))
+            self._owner_sessions.pop(session_id, None)
+            self._owner_sessions[session_id] = key or session_id
+            while len(self._owner_sessions) > self._MAX_REMEMBERED:
+                self._owner_sessions.pop(next(iter(self._owner_sessions)))
 
     def is_owner_session(self, session_id: str) -> bool:
-        return bool(session_id) and session_id in self._owner_session_ids
+        return bool(session_id) and session_id in self._owner_sessions
+
+    def key_for_session(self, session_id: str) -> str:
+        """Injection key of an owner chat seen this process, "" for any other session (A2A, messaging)."""
+        return self._owner_sessions.get(session_id, "") if session_id else ""
 
     def can_inject(self) -> bool:
         return bool(self._has_tui_host() or self._has_gateway_host())

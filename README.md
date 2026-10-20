@@ -24,6 +24,11 @@ prompt goes nowhere: the A2A adapter drops non-final sends, and the command is d
   ("да", "ок", "нет", "нет, не сейчас" …), is parsed by plugin code — never by the model — and
   applied as the decision. A peer's text therefore cannot talk the agent into approving.
   Anything else closes the window; then use the commands below.
+- **Long peer tasks.** `a2a_send(agent, message)` hands a task to a peer and returns a job id at
+  once; the peer's answer arrives later in the same chat as a separate message (`a2a_task` shows
+  the state). Use it instead of `a2a_call` for anything that may take more than a few minutes:
+  Hermes cuts every tool call at `timeouts.tools.sequential_call` (420 s by default), so a blocking
+  `a2a_call` loses the answer of a long task even though the peer finishes it.
 - **Commands.** `/a2a-allow [id]`, `/a2a-deny [id] [reason]`, `/a2a-pending`. Any of them also makes
   the current chat the feed target.
 

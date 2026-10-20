@@ -17,6 +17,7 @@ from .chats import OwnerChats
 from .cli import build_parser, command as cli_command
 from .feed import FeedRelay
 from .identity import SECTION_ID, MachineIdentity
+from .jobs import JobBoard
 from .replies import ReplyInterpreter
 from .store import RelayPaths
 
@@ -47,7 +48,7 @@ def register(ctx) -> None:
         key = chats.key_for_turn(platform, session_id)
         if not key:
             return None
-        chats.remember(session_id)
+        chats.remember(session_id, key)
         feed.claim_chat(key)
         _ensure_poller(feed)
         context = replies.on_user_message(user_message if isinstance(user_message, str) else "")
@@ -61,6 +62,28 @@ def register(ctx) -> None:
         if tool_name in _A2A_TOOLS and chats.is_owner_session(session_id):
             feed.note_own_call(False)
 
+    jobs = JobBoard(inject=inject, on_call=feed.note_own_call)
+
+    def a2a_send(args: dict, session_id: str = "", **_) -> str:
+        agent = str(args.get("agent") or "").strip()
+        message = str(args.get("message") or "").strip()
+        if not agent or not message:
+            return "Error: both 'agent' and 'message' are required."
+        key = chats.key_for_session(session_id)
+        if not key:
+            return ("Error: a2a_send works only from the owner's chat (its reply is delivered there). "
+                    "In an A2A session use a2a_call.")
+        try:
+            job = jobs.start(agent, message, key, str(args.get("context_id") or "").strip())
+        except ValueError as exc:
+            return f"Error: {exc}"
+        return (f"Sent to {agent} as {job.job_id}. Do not wait for it and do not call a2a_call for the same "
+                f"task: the peer's answer will arrive in this chat as a separate message. a2a_task shows the state.")
+
+    def a2a_task(args: dict, **_) -> str:
+        return jobs.describe(str(args.get("job") or "").strip())
+
+    _register_tools(ctx, a2a_send, a2a_task)
     ctx.register_cli_command(name="a2a-relay", help="Check and set up A2A between your machines",
                              setup_fn=build_parser, handler_fn=cli_command,
                              description="doctor: read-only checks with exact fix commands; setup: apply them.")
@@ -96,6 +119,27 @@ def register(ctx) -> None:
     ctx.register_command("a2a-pending", handler=command(lambda raw: desk.describe_pending()),
                          description="List A2A requests waiting for your decision; makes this chat the A2A feed")
     logger.info("a2a-relay: registered (state in %s)", paths.root)
+
+
+def _register_tools(ctx, a2a_send, a2a_task) -> None:
+    def schema(name: str, description: str, properties: dict, required: list) -> dict:
+        return {"name": name, "description": description,
+                "parameters": {"type": "object", "properties": properties, "required": required}}
+
+    text = lambda description: {"type": "string", "description": description}  # noqa: E731
+    send_doc = ("Hand a task to a peer agent WITHOUT waiting: returns a job id at once, and the peer's answer "
+                "arrives later in this chat as a separate message. Use it for anything that may take longer "
+                "than a few minutes (builds, test runs, investigations); a2a_call blocks and is cut at the "
+                "tool timeout (420 s by default), losing the answer.")
+    ctx.register_tool(name="a2a_send", toolset="a2a-relay", handler=a2a_send, description=send_doc, emoji="\U0001f4e8",
+                      schema=schema("a2a_send", send_doc,
+                                    {"agent": text("Configured peer name (from a2a_agents) or a full http(s):// URL."),
+                                     "message": text("The task for the peer, in natural language."),
+                                     "context_id": text("Optional: context id of an earlier exchange to continue.")},
+                                    ["agent", "message"]))
+    task_doc = "State of tasks sent with a2a_send from this machine; pass a job id for its full answer."
+    ctx.register_tool(name="a2a_task", toolset="a2a-relay", handler=a2a_task, description=task_doc, emoji="\U0001f4e8",
+                      schema=schema("a2a_task", task_doc, {"job": text("Optional job id from a2a_send.")}, []))
 
 
 def _ensure_poller(feed: FeedRelay) -> None:
