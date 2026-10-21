@@ -56,6 +56,7 @@ class HostFacts:
         self.profile = profile
         self.default_routes = default_routes or {}
         self.plugin_enabled_in: Callable[[Path], bool] = _plugin_enabled_in
+        self.fleet = None  # fleet.Fleet of the active profile, when the plugin could build one
 
     @classmethod
     def live(cls) -> "HostFacts":
@@ -68,7 +69,8 @@ class HostFacts:
             toolsets = set((config.get("platform_toolsets") or {}).get("a2a") or [])
         try:
             from hermes_cli.profiles import get_active_profile_name, get_profile_dir, list_profiles
-            profile = get_active_profile_name()
+            # "custom" is a HERMES_HOME outside ~/.hermes: a standalone install, its own default profile.
+            profile = get_active_profile_name().replace("custom", "default")
             profiles = {p.name: get_profile_dir(p.name) for p in list_profiles() if p.name != "default"}
             routes = _default_profile_routes(get_profile_dir("default")) if profile != "default" else {}
         except Exception:
@@ -78,8 +80,14 @@ class HostFacts:
             fix = hasattr(GatewayPluginInjectionMixin, "_dispatch_plugin_local_injection")
         except Exception:
             fix = False
-        return cls(config, get_env_value, toolsets, profiles, fix, socket.gethostname(), _http_get,
-                   profile=profile, default_routes=routes)
+        facts = cls(config, get_env_value, toolsets, profiles, fix, socket.gethostname(), _http_get,
+                    profile=profile, default_routes=routes)
+        try:
+            from .cli import build_fleet
+            facts.fleet = build_fleet()
+        except ValueError:
+            pass
+        return facts
 
 
 def _read_profile_config(home: Path) -> Mapping[str, Any]:
@@ -159,7 +167,7 @@ class Doctor:
             checks += [self.a2a_platform(), self.node_name(), self.inbound_auth(), self.reply_timeout()]
         else:
             checks.append(self.profile_route())
-        checks += [self.a2a_toolset(), self.peer_timeouts(), self.local_injection_fix()]
+        checks += [self.a2a_toolset(), self.peer_timeouts(), self.local_injection_fix(), self.fleet()]
         if probe_peers:
             checks.extend(self.peers())
         if self.is_default_profile:
@@ -259,6 +267,20 @@ class Doctor:
                      "this Hermes build drops plugin messages into chats served by the gateway itself "
                      "(the Windows TUI); needs NousResearch/hermes-agent@11ba615c3",
                      [["update", "--set-channel", "main"], ["update"]])
+
+    def fleet(self) -> Check:
+        fleet = self.facts.fleet
+        if fleet is None or not fleet.members() or not fleet.secret():
+            return Check("fleet pairing", WARN, "no fleet: peers are paired by hand. To pair every machine with "
+                                                "every other: hermes a2a-relay fleet add / invite (see the README)")
+        off, missing = fleet.outbound_off_fleet(), fleet.missing_inbound()
+        if not off and not missing:
+            legacy = fleet.legacy_inbound()
+            return Check("fleet pairing", OK, f"{len(fleet.members())} members"
+                         + (f"; pre-fleet tokens still accepted from {', '.join(legacy)} (fleet prune)" if legacy else ""))
+        detail = "; ".join(filter(None, [off and "outbound not on fleet tokens: " + ", ".join(off),
+                                         missing and "inbound fleet tokens missing: " + ", ".join(missing)]))
+        return Check("fleet pairing", FAIL, detail, [["a2a-relay", "fleet", "sync"]], restart=bool(missing))
 
     def peers(self) -> list[Check]:
         checks = []

@@ -45,8 +45,33 @@ def facts(config=None, env=None, toolsets=("a2a",), profiles=None, fix=True, htt
             return 200, {"name": "m4"}
         return (200, {"status": "ok", "served_agents": []}) if headers else (200, {"status": "ok"})
 
-    return doctor.HostFacts(GOOD_CONFIG if config is None else config, env.get, set(toolsets),
-                            profiles or {}, fix, "dsfox-pc2", http_get)
+    result = doctor.HostFacts(GOOD_CONFIG if config is None else config, env.get, set(toolsets),
+                              profiles or {}, fix, "dsfox-pc2", http_get)
+    result.fleet = FleetStub()
+    return result
+
+
+class FleetStub:
+    """A synced fleet; tests override fields to break it."""
+
+    def __init__(self, members=None, secret="s" * 43, off=(), missing=(), legacy=()):
+        self._members = {"win": "http://w:9900", "m4": "http://m4:9900"} if members is None else members
+        self._secret, self._off, self._missing, self._legacy = secret, list(off), list(missing), list(legacy)
+
+    def members(self):
+        return self._members
+
+    def secret(self):
+        return self._secret
+
+    def outbound_off_fleet(self):
+        return self._off
+
+    def missing_inbound(self):
+        return self._missing
+
+    def legacy_inbound(self):
+        return self._legacy
 
 
 def by_name(checks):
@@ -57,6 +82,20 @@ class DoctorTests(unittest.TestCase):
     def test_healthy_machine_has_no_failures(self):
         checks = doctor.Doctor(facts()).run()
         self.assertEqual([c.name for c in checks if c.status != "ok"], [])
+
+    def test_fleet_check(self):
+        def fleet_check(stub):
+            host = facts()
+            host.fleet = stub
+            return by_name(doctor.Doctor(host).run(probe_peers=False))["fleet pairing"]
+        self.assertEqual(fleet_check(None).status, "warn")
+        self.assertEqual(fleet_check(FleetStub(secret="")).status, "warn")
+        self.assertIn("pre-fleet tokens still accepted from m4", fleet_check(FleetStub(legacy=["m4"])).detail)
+        broken = fleet_check(FleetStub(off=["m5"], missing=["m4"]))
+        self.assertTrue(broken.failed)
+        self.assertEqual(broken.fixes, [["a2a-relay", "fleet", "sync"]])
+        self.assertTrue(broken.restart)
+        self.assertFalse(fleet_check(FleetStub(off=["m5"])).restart)
 
     def test_missing_toolset_suggests_the_exact_command(self):
         check = by_name(doctor.Doctor(facts(toolsets=())).run())["inbound sessions can call peers"]

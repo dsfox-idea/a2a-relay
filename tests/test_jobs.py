@@ -20,7 +20,9 @@ def _load(name: str):
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
-    return sys.modules[f"a2a_relay_under_test.{name}"] if name else sys.modules["a2a_relay_under_test"]
+    if not name:
+        return sys.modules["a2a_relay_under_test"]
+    return importlib.import_module(f"a2a_relay_under_test.{name}")
 
 
 jobs = _load("jobs")

@@ -51,6 +51,36 @@ the caller; each configured peer is reachable and accepts its token; the Hermes 
 into chats the gateway serves itself (the Windows TUI); every profile has the plugin too. Run it
 per profile with `hermes -p <profile> a2a-relay doctor`. Tokens are never printed.
 
+## Pairing machines (fleet)
+
+Every machine must hold a token for every other one. Instead of pairing each pair by hand, a fleet
+shares one secret; the token machine A presents to machine B is `HMAC(secret, "A>B")`, so every
+direction has its own token and nothing but the secret is ever exchanged.
+
+```bash
+# first machine (A2A_AGENT_NAME=win)
+hermes a2a-relay fleet add win http://100.97.1.117:9900
+hermes a2a-relay fleet add m4  http://100.96.62.85:9900
+hermes a2a-relay fleet invite        # prints: hermes a2a-relay fleet join a2ar1....
+# on m4, in a terminal (the code carries the secret: never paste it into a chat)
+hermes a2a-relay fleet join a2ar1....
+# then restart the gateway on every machine, and on each one:
+hermes a2a-relay fleet sync          # switches outbound peers to fleet tokens once they accept them
+```
+
+- To add a machine later: `fleet add` it on any member, `fleet invite`, `fleet join` on the new
+  machine, `fleet add` + `fleet sync` on the other members (a member list has no secret, so an
+  agent may run these for you over A2A), then restart their gateways.
+- Hermes reads inbound tokens only when the gateway starts, so every membership change needs a
+  gateway restart on the machines that must accept the new peer.
+- Migration from hand-made pairs is safe: `sync` adds fleet tokens next to the old ones and moves an
+  outbound peer to its fleet token only once that peer accepts it. When `doctor` shows every
+  machine on fleet tokens, `fleet prune` drops the old inbound tokens.
+- Other profiles on a machine reuse its membership: `hermes -p growser a2a-relay fleet sync`
+  points their peers (including routes like `m4-growser` at `<m4>/growser/`) at the fleet tokens.
+- One secret means one leaked machine exposes the fleet; rotate by removing the machine and
+  re-inviting the others.
+
 For development, a clone linked into `~/.hermes/plugins/a2a-relay` works as well (on Windows use a
 directory junction: a symlink needs admin rights).
 
