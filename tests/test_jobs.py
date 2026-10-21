@@ -116,8 +116,16 @@ class JobBoardTests(unittest.TestCase):
         client = FakeClient()
         board = self.board(client, on_call=marks.append)
         board.start("m4", "x", "k", context_id="ctx-prev", run_inline=True)
-        self.assertEqual(client.calls, [("m4", "x", "ctx-prev")])
+        self.assertEqual(client.calls, [("m4", "x" + jobs.PEER_HINT, "ctx-prev")])
         self.assertEqual(marks, [True, False])
+
+    def test_job_waits_an_hour_whatever_the_peer_timeout(self):
+        seen = []
+        client = FakeClient()
+        client.send = lambda agent, peer, message, context_id: seen.append(peer["timeout"]) or ("ok", "", "")
+        self.board(client).start("m4", "x", "k", run_inline=True)
+        self.assertEqual(seen, [jobs.JOB_WAIT_SECONDS])
+        self.assertIn("background", jobs.PEER_HINT)
 
 
 class ToolTests(unittest.TestCase):

@@ -17,7 +17,8 @@ from typing import Any, Callable, Mapping, Optional
 PLUGIN = "a2a-relay"
 INSTALL_SOURCE = "dsfox-idea/a2a-relay"
 DEFAULT_APPROVAL_TIMEOUT = 300
-REPLY_TIMEOUT_TARGET = 900
+REPLY_TIMEOUT_TARGET = 900   # caller-side a2a_agents.<peer>.timeout for a blocking a2a_call
+INBOUND_REPLY_TARGET = 3600  # this node's A2A_REPLY_TIMEOUT: covers a2a_send jobs (jobs.JOB_WAIT_SECONDS)
 PROBE_TIMEOUT = 5
 
 OK, WARN, FAIL = "ok", "warn", "fail"
@@ -231,10 +232,11 @@ class Doctor:
 
     def reply_timeout(self) -> Check:
         value = _int(self.facts.env("A2A_REPLY_TIMEOUT"), DEFAULT_APPROVAL_TIMEOUT)
-        ok = value > self.approval_timeout
-        return Check("reply outlasts an approval", OK if ok else FAIL,
-                     f"A2A_REPLY_TIMEOUT {value}s, approvals.timeout {self.approval_timeout}s",
-                     [] if ok else [["config", "set", "A2A_REPLY_TIMEOUT", str(self.timeout_target)]], restart=True)
+        target = max(INBOUND_REPLY_TARGET, self.approval_timeout + 60)
+        ok = value >= target
+        return Check("long peer tasks get a reply", OK if ok else FAIL,
+                     f"A2A_REPLY_TIMEOUT {value}s (needs {target}s: a2a_send jobs and late approvals)",
+                     [] if ok else [["config", "set", "A2A_REPLY_TIMEOUT", str(target)]], restart=True)
 
     def peer_timeouts(self) -> Check:
         peers = self.facts.config.get("a2a_agents") or {}

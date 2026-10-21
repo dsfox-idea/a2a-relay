@@ -32,7 +32,7 @@ GOOD_CONFIG = {
                           "timeout": 900}},
 }
 GOOD_ENV = {"A2A_AGENT_NAME": "win", "A2A_PEER_TOKENS": "m4:tok", "A2A_TRUSTED_PEERS": "m4",
-            "A2A_REPLY_TIMEOUT": "900"}
+            "A2A_REPLY_TIMEOUT": "3600"}
 
 
 def facts(config=None, env=None, toolsets=("a2a",), profiles=None, fix=True, http=None):
@@ -68,12 +68,12 @@ class DoctorTests(unittest.TestCase):
         config = dict(GOOD_CONFIG, approvals={"timeout": 600},
                       a2a_agents={"m4": {"url": "http://m4:9900", "timeout": 300}})
         checks = by_name(doctor.Doctor(facts(config=config, env=dict(GOOD_ENV, A2A_REPLY_TIMEOUT="300"))).run())
-        self.assertEqual(checks["reply outlasts an approval"].fixes, [["config", "set", "A2A_REPLY_TIMEOUT", "900"]])
+        self.assertEqual(checks["long peer tasks get a reply"].fixes, [["config", "set", "A2A_REPLY_TIMEOUT", "3600"]])
         self.assertEqual(checks["outbound peers"].fixes,
                          [["config", "set", "a2a_agents.m4.timeout", "900", "--force"]])
-        long = dict(GOOD_CONFIG, approvals={"timeout": 1200})
-        target = by_name(doctor.Doctor(facts(config=long)).run())["reply outlasts an approval"].fixes[0][-1]
-        self.assertEqual(target, "1260")
+        long = dict(GOOD_CONFIG, approvals={"timeout": 4000})
+        target = by_name(doctor.Doctor(facts(config=long)).run())["long peer tasks get a reply"].fixes[0][-1]
+        self.assertEqual(target, "4060")
 
     def test_node_name_defaults_to_short_hostname(self):
         check = by_name(doctor.Doctor(facts(env=dict(GOOD_ENV, A2A_AGENT_NAME=""))).run())["A2A node name"]
@@ -153,7 +153,7 @@ class ProfileTests(unittest.TestCase):
     def test_routed_profile_skips_server_checks(self):
         checks = by_name(doctor.Doctor(self.profile_facts({"growser": {"profile": "growser"}})).run())
         self.assertEqual(checks["reachable over A2A"].status, "ok")
-        for server_only in ("A2A platform enabled", "A2A node name", "inbound peers", "reply outlasts an approval",
+        for server_only in ("A2A platform enabled", "A2A node name", "inbound peers", "long peer tasks get a reply",
                             "profile growser"):
             self.assertNotIn(server_only, checks)
         self.assertEqual([c.name for c in checks.values() if c.status != "ok"], [])

@@ -19,6 +19,13 @@ logger = logging.getLogger("a2a_relay")
 
 PENDING, DONE, FAILED = "pending", "done", "failed"
 _MAX_KEPT = 100
+# Nobody blocks on a job, so its wait is not the peer's a2a_call timeout; the peer's own
+# A2A_REPLY_TIMEOUT must be at least this long too (doctor checks it).
+JOB_WAIT_SECONDS = 3600
+# The peer's tool calls are cut at 420 s as well; without this hint it learns that by losing 7 minutes.
+PEER_HINT = ("\n\n[a2a-relay: the sender is not waiting on this call; reply only when the task is done, within "
+             f"{JOB_WAIT_SECONDS // 60} minutes. Run any command that may take longer than 5 minutes in the "
+             "background and wait for it to finish; a foreground tool call is cut at 420 s.]")
 _REPLY_HEADER = "[a2a-relay: ответ пира на задачу, отправленную из этого чата через a2a_send]"
 
 
@@ -89,8 +96,10 @@ class JobBoard:
 
     def _run(self, job: Job, peer: dict, context_id: str) -> None:
         self.on_call(True)
+        peer = dict(peer, timeout=max(int(peer.get("timeout") or 0), JOB_WAIT_SECONDS))
         try:
-            reply, job.context_id, job.peer_state = self.client.send(job.agent, peer, job.message, context_id)
+            reply, job.context_id, job.peer_state = self.client.send(job.agent, peer, job.message + PEER_HINT,
+                                                                     context_id)
             job.reply, job.state = reply or "(no text reply)", DONE
         except Exception as exc:  # urllib / ValueError from the stock client
             job.reply, job.state = f"{type(exc).__name__}: {exc}", FAILED
