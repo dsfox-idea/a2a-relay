@@ -29,6 +29,12 @@ prompt goes nowhere: the A2A adapter drops non-final sends, and the command is d
   the state). Use it instead of `a2a_call` for anything that may take more than a few minutes:
   Hermes cuts every tool call at `timeouts.tools.sequential_call` (420 s by default), so a blocking
   `a2a_call` loses the answer of a long task even though the peer finishes it.
+- **Gateway restarts without you.** The `gateway_restart` tool restarts this machine's gateway the
+  way the `/restart` chat command does: it waits for running turns (the calling one included), then
+  a detached watcher or the service manager starts the new process. When asked from your chat, the
+  new gateway posts a notice there, so the agent re-checks what it was waiting on. To restart
+  another machine, an agent asks that machine's agent over A2A. (`hermes gateway restart` in an
+  agent's terminal kills the gateway the agent runs in.)
 - **Commands.** `/a2a-allow [id]`, `/a2a-deny [id] [reason]`, `/a2a-pending`. Any of them also makes
   the current chat the feed target.
 

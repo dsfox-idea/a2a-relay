@@ -19,6 +19,7 @@ from .feed import FeedRelay
 from .identity import SECTION_ID, MachineIdentity
 from .jobs import JobBoard
 from .replies import ReplyInterpreter
+from .restart import GatewayRestart
 from .store import RelayPaths
 
 logger = logging.getLogger("a2a_relay")
@@ -83,7 +84,13 @@ def register(ctx) -> None:
     def a2a_task(args: dict, **_) -> str:
         return jobs.describe(str(args.get("job") or "").strip())
 
-    _register_tools(ctx, a2a_send, a2a_task)
+    restarter = GatewayRestart(paths.root / "restart_notice.json", inject)
+
+    def gateway_restart(args: dict, session_id: str = "", **_) -> str:
+        return restarter.request(announce_to=chats.key_for_session(session_id))
+
+    _register_tools(ctx, a2a_send, a2a_task, gateway_restart)
+    restarter.announce_in_background()
     ctx.register_cli_command(name="a2a-relay", help="Check and set up A2A between your machines",
                              setup_fn=build_parser, handler_fn=cli_command,
                              description="doctor: read-only checks with exact fix commands; setup: apply them.")
@@ -121,7 +128,7 @@ def register(ctx) -> None:
     logger.info("a2a-relay: registered (state in %s)", paths.root)
 
 
-def _register_tools(ctx, a2a_send, a2a_task) -> None:
+def _register_tools(ctx, a2a_send, a2a_task, gateway_restart) -> None:
     def schema(name: str, description: str, properties: dict, required: list) -> dict:
         return {"name": name, "description": description,
                 "parameters": {"type": "object", "properties": properties, "required": required}}
@@ -140,6 +147,13 @@ def _register_tools(ctx, a2a_send, a2a_task) -> None:
     task_doc = "State of tasks sent with a2a_send from this machine; pass a job id for its full answer."
     ctx.register_tool(name="a2a_task", toolset="a2a-relay", handler=a2a_task, description=task_doc, emoji="\U0001f4e8",
                       schema=schema("a2a_task", task_doc, {"job": text("Optional job id from a2a_send.")}, []))
+    restart_doc = ("Restart THIS machine's Hermes gateway safely (to load new plugin code, .env tokens or config). "
+                   "Waits for running turns, this one included, then restarts; the new process is up 10-30 s "
+                   "after your turn ends, and from your own chat you get a notice when it is back. Never run "
+                   "`hermes gateway restart` in the terminal instead: that kills the gateway you run in. To "
+                   "restart another machine, ask its agent (a2a_call) to call this tool.")
+    ctx.register_tool(name="gateway_restart", toolset="a2a-relay", handler=gateway_restart, description=restart_doc,
+                      emoji="\u267b", schema=schema("gateway_restart", restart_doc, {}, []))
 
 
 def _ensure_poller(feed: FeedRelay) -> None:
