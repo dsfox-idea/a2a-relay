@@ -99,6 +99,25 @@ class RestartTests(unittest.TestCase):
         self.assertFalse(self.marker.exists())
         self.assertFalse(tool.announce(), "announced only once")
 
+    def test_waits_for_the_runner_that_appears_after_plugin_load(self):
+        self.marker.write_text(json.dumps({"session_key": "k", "pid": -1, "ts": 0}), encoding="utf-8")
+        runners = [None, None, object()]
+        tool = restart.GatewayRestart(self.marker, lambda key, text: self.sent.append((key, text)) or True,
+                                      runner=lambda: runners.pop(0) if len(runners) > 1 else runners[0],
+                                      retry_seconds=0)
+        tool._clock = lambda: 20.0
+        self.assertTrue(tool._announce_when_gateway())
+        self.assertEqual([key for key, _ in self.sent], ["k"])
+        self.assertFalse(self.marker.exists())
+
+    def test_a_process_without_runner_leaves_the_marker(self):
+        self.marker.write_text(json.dumps({"session_key": "k", "pid": -1, "ts": 0}), encoding="utf-8")
+        tool = self.tool(None)
+        tool._clock = lambda: 20.0
+        self.assertFalse(tool._announce_when_gateway())
+        self.assertEqual(self.sent, [])
+        self.assertTrue(self.marker.exists(), "the gateway process must still find it")
+
     def test_marker_of_this_process_or_too_old_is_ignored(self):
         self.marker.write_text(json.dumps({"session_key": "k", "pid": os.getpid(), "ts": 0}), encoding="utf-8")
         self.assertIsNone(self.tool(object()).pending_announcement())

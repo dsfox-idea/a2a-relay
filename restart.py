@@ -138,10 +138,22 @@ class GatewayRestart:
         return data
 
     def announce_in_background(self) -> None:
-        """Called at plugin load in the gateway process: post the "back" notice once the chat accepts it."""
-        if self._runner() is None or self.pending_announcement() is None:
+        """Called at plugin load: post the "back" notice once this process turns out to be the gateway.
+
+        The plugin loads a few seconds before the gateway runner exists, so the thread waits for it."""
+        if self.pending_announcement() is None:
             return
-        threading.Thread(target=self.announce, daemon=True, name="a2a-relay-restart-notice").start()
+        threading.Thread(target=self._announce_when_gateway, daemon=True, name="a2a-relay-restart-notice").start()
+
+    def _announce_when_gateway(self) -> bool:
+        for attempt in range(_ANNOUNCE_TRIES):
+            if self._runner() is not None:
+                return self.announce()
+            if attempt + 1 < _ANNOUNCE_TRIES:
+                time.sleep(self._retry_seconds)
+        # Not the gateway (TUI, a CLI command): leave the marker for the gateway process.
+        logger.debug("a2a-relay: no gateway runner in this process; restart notice left for the gateway")
+        return False
 
     def announce(self) -> bool:
         data = self.pending_announcement()
