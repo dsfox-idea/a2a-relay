@@ -69,21 +69,30 @@ class ApprovalBridge:
     """Publishes A2A approval prompts and applies the user's decisions (gateway process)."""
 
     def __init__(self, paths: RelayPaths, queue: Optional[GatewayQueue] = None,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 auto_decide: Optional[Callable[[str, list], Optional[str]]] = None):
         self._paths = paths
         self._queue = queue or GatewayQueue()
         self._clock = clock
+        self._auto_decide = auto_decide or (lambda command, pattern_keys: None)
         self._lock = threading.Lock()
         self._tracked: dict[str, str] = {}  # request_id -> session_key
 
     def on_pre_approval_request(self, session_key: str = "", command: str = "", description: str = "",
-                                surface: str = "", coalesced: bool = False, **_: object) -> None:
+                                surface: str = "", coalesced: bool = False, pattern_keys=None,
+                                **_: object) -> None:
         if surface != "gateway" or coalesced or A2A_SESSION_MARKER not in (session_key or ""):
             return
+        auto = self._auto_decide(command, list(pattern_keys or []))
         with self._lock:
             request_id = self._queue.find_request_id(session_key, command, set(self._tracked))
             if not request_id:
                 logger.warning("a2a-relay: approval prompt in %s has no matching queue entry", session_key)
+                return
+            if auto in (ALLOW, DENY):
+                resolved = self._queue.resolve(session_key, auto, request_id,
+                                               None if auto == ALLOW else "refused by the A2A trust level")
+                logger.info("a2a-relay: trust level settled approval %s as %s (%d)", request_id[:8], auto, resolved)
                 return
             self._tracked[request_id] = session_key
         now = self._clock()

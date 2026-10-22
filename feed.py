@@ -63,6 +63,16 @@ def _pid_alive_windows(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def owner_chat_alive(paths: RelayPaths) -> bool:
+    """True when the process that owns the feed (the owner's last active chat) is still running."""
+    with SharedState(paths).locked() as state:
+        owner = state.get("owner") or {}
+    pid = owner.get("pid")
+    if not pid or not owner.get("session_key"):
+        return False
+    return _pid_alive(int(pid))
+
+
 def _short(text: str, limit: int = 500) -> str:
     text = (text or "").strip()
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -170,6 +180,15 @@ class FeedRelay:
 
     def _approval_event(self, rec: dict) -> Optional[dict]:
         rid = str(rec.get("request_id") or "")
+        if rec.get("type") == "request" and rec.get("kind") == "task":
+            left = max(0, int(float(rec.get("expires_at") or 0) - self._clock()))
+            return {"kind": "approval", "request_id": rid, "ts": rec.get("ts"), "text": (
+                f"⚠ {rec.get('peer') or '?'} просит выполнить задачу на {self._node}, id {rid[:8]}, "
+                f"осталось {left} с. Уровень доверия профиля требует решения Дмитрия до начала работы.\n"
+                f"Задача: {_short(rec.get('command', ''), 400)}\n"
+                "Ответь «да» или «нет» (после «нет» можно указать причину). "
+                f"Если ждут несколько запросов: /a2a-allow {rid[:8]} или /a2a-deny {rid[:8]} [причина].\n"
+                "Без решения задача будет отклонена по истечении времени.")}
         if rec.get("type") == "request":
             left = max(0, int(float(rec.get("expires_at") or 0) - self._clock()))
             return {"kind": "approval", "request_id": rid, "ts": rec.get("ts"), "text": (

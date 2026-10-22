@@ -35,8 +35,27 @@ prompt goes nowhere: the A2A adapter drops non-final sends, and the command is d
   new gateway posts a notice there, so the agent re-checks what it was waiting on. To restart
   another machine, an agent asks that machine's agent over A2A. (`hermes gateway restart` in an
   agent's terminal kills the gateway the agent runs in.)
-- **Commands.** `/a2a-allow [id]`, `/a2a-deny [id] [reason]`, `/a2a-pending`. Any of them also makes
-  the current chat the feed target.
+- **Trust levels.** How much an inbound A2A task may do in this profile without you. The level belongs
+  to the receiving profile (`$HERMES_HOME/a2a_relay/trust.json`); `0` is the most autonomous and
+  every higher number is stricter, so `strict` always names the top level.
+
+  | Level | Task start | Commands Hermes would ask about | Tools | Forward to a peer | Peer text framed as untrusted |
+  |---|---|---|---|---|---|
+  | 0 autonomous | at once | run on their own | all | yes | no |
+  | 1 delegate (default) | at once | run on their own, except system changes: asked | all | yes | no |
+  | 2 allow | at once | run when they match the allow-list, others asked | all | no | yes |
+  | 3 read | at once | none | read tools + `git status/log/diff/show/branch`, `rg`, `ls`, `cat`, `head`, `tail`, `hermes ... doctor/status` | no | yes |
+  | 4 observe | after your "да" | as level 2 | as level 2 | no | yes |
+
+  System changes are global package installs (`pip install` outside a venv, `npm -g`, `brew`,
+  `winget`, `apt`, `cargo install`, ...), `hermes update/plugins/config/tools/setup`, and writes to
+  `config.yaml`, `.env`, `SOUL.md` or the relay's own state. Hermes' floors (hardline blocks,
+  `approvals.deny`) stay in force at every level. A level-4 task with no open chat of yours, a "нет"
+  or no answer within `approvals.timeout` is returned to the peer as rejected, with the reason.
+  `/a2a-trust` shows the level, `/a2a-trust <0-4|name|strict>` sets it, `/a2a-trust allow <glob>` /
+  `disallow <glob>` edit the allow-list. Only your chats can run it, never an A2A session.
+- **Commands.** `/a2a-allow [id]`, `/a2a-deny [id] [reason]`, `/a2a-pending`, `/a2a-trust`. Any of them
+  also makes the current chat the feed target.
 
 ## Install
 

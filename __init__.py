@@ -15,12 +15,14 @@ import threading
 from .approvals import ALLOW, DENY, ApprovalBridge, DecisionDesk
 from .chats import OwnerChats
 from .cli import build_parser, command as cli_command
-from .feed import FeedRelay
+from .feed import FeedRelay, owner_chat_alive
+from .hold import TaskHold, level_note
 from .identity import SECTION_ID, MachineIdentity
 from .jobs import JobBoard
 from .replies import ReplyInterpreter
 from .restart import GatewayRestart
 from .store import RelayPaths
+from .trust import CommandRules, TrustCommand, TrustGate, TrustPolicy, current_session_is_a2a
 
 logger = logging.getLogger("a2a_relay")
 
@@ -40,12 +42,32 @@ def register(ctx) -> None:
     def inject(session_key: str, text: str) -> bool:
         return bool(ctx.inject_message(text, session_key=session_key))
 
-    bridge = ApprovalBridge(paths)
+    def profile_home():
+        # Read per call: a forwarded profile's turn runs under its own HERMES_HOME override.
+        from hermes_constants import get_hermes_home
+        return get_hermes_home()
+
+    policy = TrustPolicy(lambda: profile_home() / "a2a_relay")
+    hold: TaskHold
+
+    def owner_said_yes() -> bool:
+        from gateway.session_context import get_session_env
+        return hold.is_approved(get_session_env("HERMES_SESSION_CHAT_ID", "") or "")
+
+    gate = TrustGate(policy, CommandRules(profile_home), paths.trust_journal,
+                     owner_said_yes=owner_said_yes)
+    hold = TaskHold(paths, gate, owner_present=lambda: owner_chat_alive(paths))
+    trust_command = TrustCommand(policy, paths.trust_journal)
+    bridge = ApprovalBridge(paths, auto_decide=lambda command, keys: (
+        gate.auto_decision(command, keys) if current_session_is_a2a() else None))
     desk = DecisionDesk(paths)
     replies = ReplyInterpreter(desk)
     feed = FeedRelay(paths, inject=inject, can_inject=chats.can_inject, on_asked=replies.note_asked)
 
     def on_pre_llm_call(user_message=None, platform: str = "", session_id: str = "", **_):
+        if platform == "a2a" or current_session_is_a2a():
+            level = gate.level()
+            return None if level.neutral_framing else {"context": level_note(level)}
         key = chats.key_for_turn(platform, session_id)
         if not key:
             return None
@@ -55,9 +77,10 @@ def register(ctx) -> None:
         context = replies.on_user_message(user_message if isinstance(user_message, str) else "")
         return {"context": context} if context else None
 
-    def on_pre_tool_call(tool_name: str = "", session_id: str = "", **_):
+    def on_pre_tool_call(tool_name: str = "", session_id: str = "", args=None, **_):
         if tool_name in _A2A_TOOLS and chats.is_owner_session(session_id):
             feed.note_own_call(True)
+        return gate.on_pre_tool_call(tool_name=tool_name, args=args)
 
     def on_post_tool_call(tool_name: str = "", session_id: str = "", **_):
         if tool_name in _A2A_TOOLS and chats.is_owner_session(session_id):
@@ -99,6 +122,7 @@ def register(ctx) -> None:
     ctx.register_hook("post_approval_response", bridge.on_post_approval_response)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
+    ctx.register_hook("pre_gateway_dispatch", hold.on_pre_gateway_dispatch)
     ctx.register_hook("post_tool_call", on_post_tool_call)
     def claim_chat() -> None:
         """Typing any /a2a-* command makes this chat the feed target, even before its first turn."""
@@ -125,6 +149,8 @@ def register(ctx) -> None:
                          args_hint="[id] [reason]", description="Deny a pending A2A request")
     ctx.register_command("a2a-pending", handler=command(lambda raw: desk.describe_pending()),
                          description="List A2A requests waiting for your decision; makes this chat the A2A feed")
+    ctx.register_command("a2a-trust", handler=command(trust_command.handle), args_hint="[level|allow <glob>]",
+                         description="Show or set this profile's A2A trust level (0 = most autonomous, strict)")
     logger.info("a2a-relay: registered (state in %s)", paths.root)
 
 

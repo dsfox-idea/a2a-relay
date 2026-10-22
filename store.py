@@ -55,6 +55,7 @@ class RelayPaths:
         self.approvals = self.root / "approvals.jsonl"
         self.decisions = self.root / "decisions"
         self.state = self.root / "state.json"
+        self.trust_journal = self.root / "trust_journal.jsonl"
         self.lock = self.root / "state.lock"
 
     def ensure(self) -> None:
