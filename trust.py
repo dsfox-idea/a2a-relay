@@ -200,6 +200,11 @@ class CommandRules:
         if head == "rg":
             return not any(a == "--pre" or a.startswith("--pre=") for a in rest)
         if head == "git":
+            # -C <dir> only changes the directory; any other global option (-c, --exec-path, ...) can run code.
+            while len(rest) >= 2 and rest[0] == "-C":
+                rest = rest[2:]
+            if rest and rest[0].startswith("-"):
+                return False
             sub = next((a for a in rest if not a.startswith("-")), "")
             if sub not in ("status", "log", "diff", "show", "branch"):
                 return False

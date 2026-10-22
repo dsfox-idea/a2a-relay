@@ -112,10 +112,12 @@ class ToolGateTests(Env):
 
     def test_level3_read_only(self):
         self.set_level(3)
-        for command in ("git log --oneline -5", "rg -n foo", "ls -la", "hermes a2a-relay doctor", "git branch -a"):
+        for command in ("git log --oneline -5", "rg -n foo", "ls -la", "hermes a2a-relay doctor", "git branch -a",
+                        "git -C A:/dev/a2a-relay log -1 --oneline"):
             self.assertIsNone(self.call("terminal", command=command), command)
         for command in ("git pull", "git log > out.txt", "ls; rm x", "git branch -D main", "rg --pre sh x",
-                        "python -c 1", "cat a | sh"):
+                        "python -c 1", "cat a | sh", "git -c core.pager=sh log", "git -C x fetch",
+                        "git --exec-path=/tmp log"):
             self.assertEqual(self.call("terminal", command=command)["action"], "block", command)
         self.assertIsNone(self.call("read_file", path="x"))
         self.assertEqual(self.call("write_file", path="x", content="y")["action"], "block")
