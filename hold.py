@@ -27,6 +27,17 @@ logger = logging.getLogger("a2a_relay")
 
 _POLL_SECONDS = 0.5
 _MAX_APPROVED = 500
+_REPLY_MARGIN = 30.0  # the refusal must reach the peer before the adapter gives up on the task
+_TIMEOUTS = ("timeout", "timeout: the owner's chat was busy and never showed the request")
+
+
+def _reply_limit() -> float:
+    """Longest hold for a task: the A2A adapter's own wait for a reply (``A2A_REPLY_TIMEOUT``) minus a margin."""
+    try:
+        from plugins.platforms.a2a.adapter import _reply_timeout
+        return max(60.0, float(_reply_timeout()) - _REPLY_MARGIN)
+    except Exception:
+        return 300.0
 
 
 def _core_prefix(peer: str) -> str:
@@ -51,12 +62,15 @@ def level_note(level: TrustLevel) -> str:
 
 class TaskHold:
     def __init__(self, paths: RelayPaths, gate: TrustGate, owner_present: Callable[[], bool],
-                 timeout: Callable[[], float] = _approval_timeout, clock: Callable[[], float] = time.time):
+                 timeout: Callable[[], float] = _approval_timeout, clock: Callable[[], float] = time.time,
+                 limit: Optional[Callable[[], float]] = None, sleep: Callable[[float], None] = time.sleep):
         self._paths = paths
         self._gate = gate
         self._owner_present = owner_present
         self._timeout = timeout
+        self._limit = limit or _reply_limit
         self._clock = clock
+        self._sleep = sleep
 
     @property
     def _approved_file(self):
@@ -127,23 +141,40 @@ class TaskHold:
         if not self._owner_present():
             return DENY, "no open chat of the owner on this machine, nobody can approve the task now"
         request_id = uuid.uuid4().hex
-        timeout = float(self._timeout())
+        answer = float(self._timeout())
+        limit = max(answer, float(self._limit()))
         now = self._clock()
         append_jsonl(self._paths.approvals, {
             "type": "request", "kind": "task", "request_id": request_id, "session_key": "", "peer": peer,
             "command": task_text.strip()[:2000], "description": "A2A task waits for the owner's yes (trust level)",
-            "ts": now, "expires_at": now + timeout})
+            "ts": now, "answer_seconds": answer, "expires_at": now + limit})
         logger.info("a2a-relay: task from %s held for the owner as %s", peer, request_id[:8])
-        choice, reason = self._wait(request_id, timeout)
+        choice, reason = self._wait(request_id, answer, limit)
         append_jsonl(self._paths.approvals, {"type": "resolved", "request_id": request_id,
-                                             "choice": choice if reason != "timeout" else "timeout",
+                                             "choice": "timeout" if reason in _TIMEOUTS else choice,
                                              "ts": self._clock()})
+        self._paths.shown_file(request_id).unlink(missing_ok=True)
         return choice, reason
 
-    def _wait(self, request_id: str, timeout: float) -> tuple[str, str]:
+    def _shown_at(self, request_id: str) -> Optional[float]:
+        try:
+            return float(json.loads(self._paths.shown_file(request_id).read_text(encoding="utf-8"))["ts"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _wait(self, request_id: str, answer: float, limit: float) -> tuple[str, str]:
+        """The owner gets ``answer`` seconds from the moment the chat showed the prompt (an injected
+        prompt only queues while the agent works); ``limit`` bounds the whole wait."""
         decision_file = self._paths.decision_file(request_id)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        started = self._clock()
+        while True:
+            now = self._clock()
+            shown = self._shown_at(request_id)
+            if shown is not None and now >= shown + answer:
+                return DENY, "timeout"
+            if now >= started + limit:
+                return DENY, ("timeout" if shown is not None else
+                              "timeout: the owner's chat was busy and never showed the request")
             if decision_file.exists():
                 try:
                     decision = json.loads(decision_file.read_text(encoding="utf-8"))
@@ -156,5 +187,4 @@ class TaskHold:
                 if choice == ALLOW:
                     return ALLOW, ""
                 return DENY, str(decision.get("reason") or "the owner said no")
-            time.sleep(_POLL_SECONDS)
-        return DENY, "timeout"
+            self._sleep(_POLL_SECONDS)

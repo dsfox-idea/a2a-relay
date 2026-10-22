@@ -74,7 +74,9 @@ def register(ctx) -> None:
         chats.remember(session_id, key)
         feed.claim_chat(key)
         _ensure_poller(feed)
-        context = replies.on_user_message(user_message if isinstance(user_message, str) else "")
+        text = user_message if isinstance(user_message, str) else ""
+        feed.note_turn(text)  # the relay's own turn: its prompts are on screen now
+        context = replies.on_user_message(text)
         return {"context": context} if context else None
 
     def on_pre_tool_call(tool_name: str = "", session_id: str = "", args=None, **_):

@@ -244,7 +244,8 @@ class HoldTests(Env):
     def setUp(self):
         super().setUp()
         self.present = True
-        self.hold = hold_mod.TaskHold(self.paths, self.gate, owner_present=lambda: self.present, timeout=lambda: 2)
+        self.hold = hold_mod.TaskHold(self.paths, self.gate, owner_present=lambda: self.present, timeout=lambda: 2,
+                                      limit=lambda: 2)
         hold_mod._core_prefix = lambda peer: PREFIX
         self.adapter = FakeAdapter()
         self.gateway = SimpleNamespace(adapters={})
@@ -332,9 +333,79 @@ class FeedTaskPromptTests(Env):
     def test_task_request_is_rendered_as_a_task(self):
         relay = feed_mod.FeedRelay(self.paths, inject=lambda k, t: True, can_inject=lambda: True)
         event = relay._approval_event({"type": "request", "kind": "task", "request_id": "abcdef1234", "peer": "m4",
-                                       "command": "do X", "expires_at": time.time() + 60})
+                                       "command": "do X", "answer_seconds": 300, "expires_at": time.time() + 60})
         self.assertIn("просит выполнить задачу", event["text"])
+        self.assertIn("на решение 5 мин с этого сообщения", event["text"])
+        self.assertNotIn("осталось", event["text"])
         self.assertEqual(event["kind"], "approval")
+
+
+class Clock:
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+class ShownClockTests(Env):
+    """The answer window starts when the owner's chat shows the prompt, not when the task arrived."""
+
+    def setUp(self):
+        super().setUp()
+        self.clock = Clock()
+        self.injected, self.asked = [], []
+        self.feed = feed_mod.FeedRelay(self.paths, inject=lambda k, t: self.injected.append(t) or True,
+                                       can_inject=lambda: True, clock=self.clock,
+                                       on_asked=lambda ids: self.asked.extend(ids))
+        self.hold = hold_mod.TaskHold(self.paths, self.gate, owner_present=lambda: True, timeout=lambda: 300,
+                                      limit=lambda: 3600, clock=self.clock, sleep=self.tick)
+        self.events = {}
+
+    def tick(self, _seconds):
+        self.clock.now += 10
+        action = self.events.pop(round(self.clock.now), None)
+        if action:
+            action()
+
+    def request_id(self):
+        return [r for r in store.read_jsonl(self.paths.approvals) if r.get("type") == "request"][0]["request_id"]
+
+    def show(self):
+        rid = self.request_id()
+        text = feed_mod._HEADER + f"⚠ m5 просит выполнить задачу на win, id {rid[:8]}, ..."
+        self.feed._queued_prompts.append(rid)
+        self.feed.note_turn(text)
+
+    def test_busy_chat_does_not_eat_the_answer_window(self):
+        self.events[1600] = self.show                     # shown 10 minutes after the task arrived
+        self.events[1800] = lambda: store.write_json_atomic(
+            self.paths.decision_file(self.request_id()), {"choice": "once"})
+        self.assertEqual(self.hold.ask("m5", "do X"), ("once", ""))
+        self.assertEqual(self.asked, [self.request_id()], "yes/no window opens only when shown")
+
+    def test_window_runs_from_the_moment_shown(self):
+        self.events[1100] = self.show
+        self.assertEqual(self.hold.ask("m5", "do X"), ("deny", "timeout"))
+        self.assertAlmostEqual(self.clock.now, 1100 + 300, delta=10)
+
+    def test_never_shown_ends_at_the_reply_limit(self):
+        choice, reason = self.hold.ask("m5", "do X")
+        self.assertEqual(choice, "deny")
+        self.assertIn("never showed", reason)
+        self.assertAlmostEqual(self.clock.now, 1000 + 3600, delta=10)
+        resolved = [r for r in store.read_jsonl(self.paths.approvals) if r.get("type") == "resolved"]
+        self.assertEqual(resolved[0]["choice"], "timeout")
+
+    def test_only_the_relays_own_turn_counts_as_shown(self):
+        self.feed._queued_prompts.append("abcdef1234")
+        self.feed.note_turn("id abcdef12 typed by someone")
+        self.assertEqual(self.asked, [])
+        self.feed.note_turn(feed_mod._HEADER + "⚠ ... id abcdef12 ...")
+        self.assertEqual(self.asked, ["abcdef1234"])
+        self.assertTrue(self.paths.shown_file("abcdef1234").exists())
+        self.feed.note_turn(feed_mod._HEADER + "⚠ ... id abcdef12 ...")
+        self.assertEqual(self.asked, ["abcdef1234"], "marked once")
 
 
 if __name__ == "__main__":

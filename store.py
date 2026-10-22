@@ -56,6 +56,7 @@ class RelayPaths:
         self.decisions = self.root / "decisions"
         self.state = self.root / "state.json"
         self.trust_journal = self.root / "trust_journal.jsonl"
+        self.shown = self.root / "shown"  # request_id.json: when the owner's chat actually showed a prompt
         self.lock = self.root / "state.lock"
 
     def ensure(self) -> None:
@@ -63,6 +64,9 @@ class RelayPaths:
 
     def decision_file(self, request_id: str) -> Path:
         return self.decisions / f"{request_id}.json"
+
+    def shown_file(self, request_id: str) -> Path:
+        return self.shown / f"{request_id}.json"
 
 
 def append_jsonl(path: Path, record: dict) -> None:

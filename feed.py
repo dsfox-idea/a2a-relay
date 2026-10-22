@@ -9,7 +9,9 @@ import threading
 import time
 from typing import Callable, Optional
 
-from .store import RelayPaths, SharedState, file_size, read_new_records
+from .store import RelayPaths, SharedState, file_size, read_new_records, write_json_atomic
+
+_RELAY_TAG = "[a2a-relay: автоматическое уведомление"
 
 logger = logging.getLogger("a2a_relay")
 
@@ -96,6 +98,7 @@ class FeedRelay:
         self._buffer: list[dict] = []
         self._last_arrival = 0.0
         self._own_calls = 0
+        self._queued_prompts: list[str] = []  # approval ids injected but not yet shown in a turn
         self._node = os.getenv("A2A_AGENT_NAME") or "эта машина"
 
     # -- hooks -------------------------------------------------------------------------------
@@ -181,18 +184,19 @@ class FeedRelay:
     def _approval_event(self, rec: dict) -> Optional[dict]:
         rid = str(rec.get("request_id") or "")
         if rec.get("type") == "request" and rec.get("kind") == "task":
-            left = max(0, int(float(rec.get("expires_at") or 0) - self._clock()))
+            minutes = max(1, round(float(rec.get("answer_seconds") or 300) / 60))
             return {"kind": "approval", "request_id": rid, "ts": rec.get("ts"), "text": (
                 f"⚠ {rec.get('peer') or '?'} просит выполнить задачу на {self._node}, id {rid[:8]}, "
-                f"осталось {left} с. Уровень доверия профиля требует решения Дмитрия до начала работы.\n"
+                f"на решение {minutes} мин с этого сообщения. Уровень доверия профиля требует решения "
+                "Дмитрия до начала работы.\n"
                 f"Задача: {_short(rec.get('command', ''), 400)}\n"
                 "Ответь «да» или «нет» (после «нет» можно указать причину). "
                 f"Если ждут несколько запросов: /a2a-allow {rid[:8]} или /a2a-deny {rid[:8]} [причина].\n"
                 "Без решения задача будет отклонена по истечении времени.")}
         if rec.get("type") == "request":
-            left = max(0, int(float(rec.get("expires_at") or 0) - self._clock()))
+            until = time.strftime("%H:%M:%S", time.localtime(float(rec.get("expires_at") or 0)))
             return {"kind": "approval", "request_id": rid, "ts": rec.get("ts"), "text": (
-                f"⚠ Запрос {rec.get('peer') or '?'} ждёт решения Дмитрия, id {rid[:8]}, осталось {left} с.\n"
+                f"⚠ Запрос {rec.get('peer') or '?'} ждёт решения Дмитрия, id {rid[:8]}, срок до {until}.\n"
                 f"Команда: {_short(rec.get('command', ''), 400)}\n"
                 f"Почему нужно подтверждение: {_short(rec.get('description', ''), 200)}\n"
                 "Ответь «да» или «нет» (после «нет» можно указать причину). "
@@ -227,10 +231,25 @@ class FeedRelay:
         if not delivered:
             logger.info("a2a-relay: %d event(s) not delivered to %s yet, will retry", len(batch), session_key)
             return False
+        asked = [e["request_id"] for e in batch if e["kind"] == "approval"]
         with self._lock:
             self._buffer = self._buffer[len(batch):]
-        asked = [e["request_id"] for e in batch if e["kind"] == "approval"]
-        if asked:
-            self._on_asked(asked)
+            self._queued_prompts.extend(asked)
         logger.info("a2a-relay: delivered %d event(s) to %s", len(batch), session_key)
         return True
+
+    def note_turn(self, text: str) -> None:
+        """A turn starts in the owner's chat. Accepted injections only queue while the agent works, so a
+        prompt counts as shown when the relay's own injected turn runs, not when it was accepted."""
+        if not isinstance(text, str) or not text.lstrip().startswith(_RELAY_TAG):
+            return
+        with self._lock:
+            shown = [rid for rid in self._queued_prompts if f"id {rid[:8]}" in text]
+            self._queued_prompts = [rid for rid in self._queued_prompts if rid not in shown]
+        if not shown:
+            return
+        now = self._clock()
+        for rid in shown:
+            write_json_atomic(self._paths.shown_file(rid), {"request_id": rid, "ts": now})
+        self._on_asked(shown)
+        logger.info("a2a-relay: %d prompt(s) shown in the owner's chat", len(shown))
