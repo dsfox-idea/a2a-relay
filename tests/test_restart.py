@@ -47,7 +47,7 @@ class RestartTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def tool(self, runner, results=None, alive=lambda pid: False):
+    def tool(self, runner, results=None, alive=lambda pid: False, start_watcher=None):
         results = list(results or [])
 
         def inject(key, text):
@@ -56,7 +56,7 @@ class RestartTests(unittest.TestCase):
         # settle_seconds is huge so the background settle thread never fires during a test; _settle is
         # called directly where it matters.
         return restart.GatewayRestart(self.marker, inject, runner=lambda: runner, retry_seconds=0, alive=alive,
-                                      settle_seconds=10_000)
+                                      settle_seconds=10_000, start_watcher=start_watcher)
 
     def write_marker(self, **extra):
         self.marker.write_text(json.dumps({"session_key": "k", "pid": -1, "ts": 0, **extra}), encoding="utf-8")
@@ -76,11 +76,44 @@ class RestartTests(unittest.TestCase):
         finally:
             runner.close()
 
+    def test_own_start_watcher_replaces_hermes_restart_watcher(self):
+        """#12: Hermes' watcher runs `gateway restart`, which kills a client-started gateway."""
+        runner, started = FakeRunner(), []
+        try:
+            with mock.patch.object(restart, "_via_service", return_value=False):
+                out = self.tool(runner, start_watcher=lambda pid: started.append(pid) or mock.Mock(pid=7)).request(
+                    announce_to="k")
+            self.assertIn("Gateway restart scheduled", out)
+            self.assertEqual(started, [os.getpid()])
+            self.assertEqual(runner.calls[0][:2], (False, False), "no Hermes restart watcher")
+        finally:
+            runner.close()
+
+    def test_failed_start_watcher_falls_back_to_hermes_watcher(self):
+        runner = FakeRunner()
+        try:
+            def broken(pid):
+                raise OSError("spawn failed")
+            with mock.patch.object(restart, "_via_service", return_value=False):
+                self.tool(runner, start_watcher=broken).request(announce_to="k")
+            self.assertEqual(runner.calls[0][:2], (True, False))
+        finally:
+            runner.close()
+
+    def test_refused_restart_kills_the_start_watcher(self):
+        runner, watcher = FakeRunner(accept=False), mock.Mock()
+        try:
+            with mock.patch.object(restart, "_via_service", return_value=False):
+                self.tool(runner, start_watcher=lambda pid: watcher).request(announce_to="k")
+            watcher.kill.assert_called_once()
+        finally:
+            runner.close()
+
     def test_service_managed_gateway_exits_to_its_supervisor(self):
         runner = FakeRunner()
         try:
             with mock.patch.object(restart, "_via_service", return_value=True):
-                self.tool(runner).request()
+                self.tool(runner, start_watcher=lambda pid: self.fail("no watcher under a supervisor")).request()
             self.assertEqual(runner.calls[0][:2], (False, True))
             self.assertFalse(self.marker.exists(), "no chat to announce to")
         finally:
@@ -116,7 +149,8 @@ class RestartTests(unittest.TestCase):
         runners = [None, None, object()]
         tool = restart.GatewayRestart(self.marker, lambda key, text: self.sent.append((key, text)) or True,
                                       runner=lambda: runners.pop(0) if len(runners) > 1 else runners[0],
-                                      retry_seconds=0, alive=lambda pid: False, settle_seconds=10_000)
+                                      retry_seconds=0, alive=lambda pid: False, settle_seconds=10_000,
+                                      start_watcher=None)
         tool._clock = lambda: 20.0
         self.assertTrue(tool._announce_when_gateway())
         self.assertEqual([key for key, _ in self.sent], ["k"])

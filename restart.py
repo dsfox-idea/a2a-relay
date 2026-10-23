@@ -15,6 +15,7 @@ gateway that finds the announcer dead announces again.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("a2a_relay")
 
@@ -45,6 +46,34 @@ def _pid_alive(pid: int) -> bool:
     return bool(pid_exists_stdlib(int(pid)))
 
 
+_START_WATCH_SECONDS = 4 * 3600.0  # the after-turn wait can be long; `gateway start` is a no-op if one runs
+
+
+def _spawn_start_watcher(pid: int):
+    """Windows (#12): Hermes' own watcher runs `hermes gateway restart` once this gateway exits, and that
+    stops (and SIGKILLs) the gateway a TUI client auto-starts in between, killing its turn. This watcher
+    is Hermes' own script with `gateway start` instead, which does nothing when a gateway already runs.
+    Returns the Popen, or raises."""
+    from gateway.run import _resolve_hermes_bin
+    from gateway.run_shutdown import _WINDOWS_RESTART_WATCHER, GatewayShutdownMixin
+    from hermes_cli._launchers import runtime_command
+    from hermes_cli._subprocess_compat import windows_detach_flags_without_breakaway, windows_detach_popen_kwargs
+    hermes_cmd = _resolve_hermes_bin()
+    if not hermes_cmd:
+        raise RuntimeError("hermes binary not found")
+    project_root = Path(sys.modules["gateway.run_shutdown"].__file__).resolve().parent.parent
+    argv = runtime_command(project_root, [str(pid), str(_START_WATCH_SECONDS), *hermes_cmd, "gateway", "start"],
+                           code=_WINDOWS_RESTART_WATCHER)
+    env = GatewayShutdownMixin._restart_watcher_env()
+    if not env.get("VIRTUAL_ENV") and os.environ.get("VIRTUAL_ENV"):
+        env["VIRTUAL_ENV"] = os.environ["VIRTUAL_ENV"]
+    kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    try:
+        return subprocess.Popen(argv, **kwargs, **windows_detach_popen_kwargs())
+    except OSError:
+        return subprocess.Popen(argv, **kwargs, creationflags=windows_detach_flags_without_breakaway())
+
+
 def _gateway_runner():
     # Never import gateway.run here: importing it marks any process as the gateway (_HERMES_GATEWAY=1).
     module = sys.modules.get("gateway.run")
@@ -58,7 +87,9 @@ class GatewayRestart:
     def __init__(self, marker: Path, inject: Callable[[str, str], bool],
                  runner: Callable[[], object] = _gateway_runner, clock: Callable[[], float] = time.time,
                  retry_seconds: float = _ANNOUNCE_EVERY, alive: Callable[[int], bool] = _pid_alive,
-                 settle_seconds: float = _SETTLE_SECONDS):
+                 settle_seconds: float = _SETTLE_SECONDS,
+                 start_watcher: Optional[Callable[[int], Any]] = (
+                     _spawn_start_watcher if sys.platform == "win32" else None)):
         self.marker = Path(marker)
         self._inject = inject
         self._runner = runner
@@ -66,6 +97,7 @@ class GatewayRestart:
         self._retry_seconds = retry_seconds
         self._alive = alive
         self._settle_seconds = settle_seconds
+        self._start_watcher = start_watcher
 
     # -- request ---------------------------------------------------------------------------------
     def request(self, announce_to: str = "") -> str:
@@ -76,10 +108,22 @@ class GatewayRestart:
             return "A gateway restart is already in progress."
         if announce_to:
             self._write_marker(announce_to)
-        accepted = self._call_on_loop(runner)
+        via_service = _via_service()
+        watcher = None
+        if not via_service and self._start_watcher is not None:
+            try:
+                watcher = self._start_watcher(os.getpid())
+            except Exception:
+                logger.warning("a2a-relay: own start watcher failed; using Hermes' restart watcher", exc_info=True)
+        accepted = self._call_on_loop(runner, detached=not via_service and watcher is None, via_service=via_service)
         if not accepted:
             self._drop_marker()
+            if watcher is not None:
+                with contextlib.suppress(Exception):
+                    watcher.kill()
             return "Error: the gateway refused the restart (one is already running)."
+        if watcher is not None:
+            logger.info("a2a-relay: start watcher %s waits for gateway %s", getattr(watcher, "pid", "?"), os.getpid())
         active = self._safe_count(runner)
         logger.info("a2a-relay: gateway restart requested (pid %s, %d active work unit(s))", os.getpid(), active)
         return (f"Gateway restart scheduled (current PID {os.getpid()}). It waits for {active} running "
@@ -89,15 +133,14 @@ class GatewayRestart:
                    " Callers can check it by the A2A agent card answering again."))
 
     @staticmethod
-    def _call_on_loop(runner) -> bool:
+    def _call_on_loop(runner, *, detached: bool, via_service: bool) -> bool:
         loop = runner._gateway_loop
         result: list[bool] = []
         done = threading.Event()
 
         def call() -> None:
             try:
-                via_service = _via_service()
-                result.append(bool(runner.request_restart(detached=not via_service, via_service=via_service)))
+                result.append(bool(runner.request_restart(detached=detached, via_service=via_service)))
             except Exception:
                 logger.warning("a2a-relay: request_restart failed", exc_info=True)
             finally:
