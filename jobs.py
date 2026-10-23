@@ -15,6 +15,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from .delivery import ChatDelivery
+
 logger = logging.getLogger("a2a_relay")
 
 PENDING, DONE, FAILED = "pending", "done", "failed"
@@ -110,17 +112,8 @@ class JobBoard:
         self._deliver(job)
 
     def _deliver(self, job: Job) -> None:
-        text = self.render_reply(job)
-        for attempt in range(self.max_delivery_attempts):
-            try:
-                if self.inject(job.session_key, text):
-                    job.delivered = True
-                    return
-            except Exception:
-                logger.warning("a2a-relay: delivering %s raised", job.job_id, exc_info=True)
-            if attempt + 1 < self.max_delivery_attempts:
-                time.sleep(self.retry_seconds)
-        logger.warning("a2a-relay: %s could not be delivered to %s; see a2a_task", job.job_id, job.session_key)
+        delivery = ChatDelivery(self.inject, self.retry_seconds, self.max_delivery_attempts)
+        job.delivered = delivery.deliver(job.session_key, self.render_reply(job), job.job_id)
 
     @staticmethod
     def render_reply(job: Job) -> str:
