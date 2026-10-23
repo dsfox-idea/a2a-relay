@@ -166,7 +166,8 @@ class ToolTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_tools_are_registered_in_their_own_toolset(self):
-        self.assertEqual(set(self.tools), {"a2a_send", "a2a_task", "gateway_restart"})
+        self.assertEqual(set(self.tools), {"a2a_send", "a2a_task", "gateway_restart", "code_send", "code_task",
+                                           "code_cancel", "code_wait"})
         self.assertEqual(self.tools["a2a_send"][1]["toolset"], "a2a-relay")
         self.assertEqual(self.tools["a2a_send"][1]["schema"]["parameters"]["required"], ["agent", "message"])
 

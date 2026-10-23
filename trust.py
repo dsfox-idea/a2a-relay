@@ -27,7 +27,7 @@ A2A_PLATFORM = "a2a"
 A2A_SESSION_MARKER = ":a2a:"
 FORWARD_TOOLS = frozenset({"a2a_call", "a2a_send", "a2a_orchestrate"})
 READ_TOOLS = frozenset({"read_file", "search_files", "web_search", "web_extract", "session_search",
-                        "skills_list", "skill_view", "vision_analyze", "a2a_task",
+                        "skills_list", "skill_view", "vision_analyze", "a2a_task", "code_task", "code_wait",
                         "mcp__growser__web_search", "mcp__growser__web_fetch"})
 ESCALATION_RULE = "a2a-trust"
 

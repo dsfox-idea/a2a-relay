@@ -15,6 +15,7 @@ import threading
 from .approvals import ALLOW, DENY, ApprovalBridge, DecisionDesk
 from .chats import OwnerChats
 from .cli import build_parser, command as cli_command
+from .coder_tools import CodingTools
 from .feed import FeedRelay, owner_chat_alive
 from .hold import TaskHold, level_note
 from .identity import SECTION_ID, MachineIdentity
@@ -115,6 +116,9 @@ def register(ctx) -> None:
         return restarter.request(announce_to=chats.key_for_session(session_id))
 
     _register_tools(ctx, a2a_send, a2a_task, gateway_restart)
+    coding = CodingTools(lambda: profile_home() / "a2a_relay", inject, chats.key_for_session)
+    coding.register(ctx, _schema)
+    coding.reconcile_in_background()
     restarter.announce_in_background()
     ctx.register_cli_command(name="a2a-relay", help="Check and set up A2A between your machines",
                              setup_fn=build_parser, handler_fn=cli_command,
@@ -156,11 +160,13 @@ def register(ctx) -> None:
     logger.info("a2a-relay: registered (state in %s)", paths.root)
 
 
-def _register_tools(ctx, a2a_send, a2a_task, gateway_restart) -> None:
-    def schema(name: str, description: str, properties: dict, required: list) -> dict:
-        return {"name": name, "description": description,
-                "parameters": {"type": "object", "properties": properties, "required": required}}
+def _schema(name: str, description: str, properties: dict, required: list) -> dict:
+    return {"name": name, "description": description,
+            "parameters": {"type": "object", "properties": properties, "required": required}}
 
+
+def _register_tools(ctx, a2a_send, a2a_task, gateway_restart) -> None:
+    schema = _schema
     text = lambda description: {"type": "string", "description": description}  # noqa: E731
     send_doc = ("Hand a task to a peer agent WITHOUT waiting: returns a job id at once, and the peer's answer "
                 "arrives later in this chat as a separate message. Use it for anything that may take longer "
