@@ -97,6 +97,26 @@ class InitTests(unittest.TestCase):
             self.assertEqual((cfg.executors, cfg.session_mode("claude")), (("claude",), "default"))
             self.assertIn("already exists", cdoc.init_config(relay, [], home=home))
 
+    def test_init_with_opencode_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relay, home = Path(tmp) / "a2a_relay", Path(tmp) / "home"
+            (home / "dev").mkdir(parents=True)
+            with self.assertRaises(coder.CoderError):
+                cdoc.init_config(relay, [], home=home, executors=("opencode", "pi"))
+            self.assertFalse((relay / "coder.json").exists())
+            cdoc.init_config(relay, [], home=home, executors=("opencode", "claude", "opencode"))
+            cfg = coder.CoderConfig.load(relay / "coder.json")
+            self.assertEqual((cfg.executors, cfg.default_executor), (("opencode", "claude"), "opencode"))
+            self.assertEqual((cfg.session_mode("claude"), cfg.session_mode("opencode")), ("default", ""))
+
+    def test_init_opencode_only_has_no_claude_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relay, home = Path(tmp) / "a2a_relay", Path(tmp) / "home"
+            (home / "dev").mkdir(parents=True)
+            cdoc.init_config(relay, [], home=home, executors=("opencode",))
+            cfg = coder.CoderConfig.load(relay / "coder.json")
+            self.assertEqual((cfg.executors, cfg.session_mode("claude")), (("opencode",), ""))
+
 
 if __name__ == "__main__":
     unittest.main()

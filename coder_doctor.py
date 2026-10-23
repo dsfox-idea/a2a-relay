@@ -109,16 +109,25 @@ class CoderDoctor:
         return Check("coding timeout", OK, f"{cfg.timeout_s} s")
 
 
-def default_config(roots: list[str]) -> dict:
-    return {"executors": ["claude"], "default_executor": "claude", "roots": roots, "timeout_s": JOB_WAIT_SECONDS,
-            "permissions": "approve-all", "session_modes": {"claude": "default"}}
+def default_config(roots: list[str], executors: tuple[str, ...] = ("claude",)) -> dict:
+    modes = {"claude": "default"} if "claude" in executors else {}
+    return {"executors": list(executors), "default_executor": executors[0], "roots": roots,
+            "timeout_s": JOB_WAIT_SECONDS, "permissions": "approve-all", "session_modes": modes}
 
 
-def init_config(relay_root: Path, roots: list[str], home: Path = Path.home()) -> str:
-    """Write a default coder.json; refuses to overwrite one. Returns the message for the owner."""
+def init_config(relay_root: Path, roots: list[str], home: Path = Path.home(),
+                executors: tuple[str, ...] = ()) -> str:
+    """Write a default coder.json; refuses to overwrite one. Returns the message for the owner.
+
+    The file sits under a2a_relay/, which a peer's session may not edit (trust gate), so this command is how a
+    machine's own agent enables coding when the owner asks for it."""
     path = Path(relay_root) / "coder.json"
     if path.exists():
         return f"{path} already exists; edit it by hand."
+    executors = tuple(dict.fromkeys(executors)) or ("claude",)
+    unknown = [e for e in executors if e not in EXECUTOR_COMMANDS]
+    if unknown:
+        raise CoderError(f"unknown executor: {', '.join(unknown)} (known: {', '.join(EXECUTOR_COMMANDS)})")
     if not roots:
         default = home / "dev"
         if not default.is_dir():
@@ -129,5 +138,6 @@ def init_config(relay_root: Path, roots: list[str], home: Path = Path.home()) ->
     if missing:
         raise CoderError(f"not a directory: {', '.join(missing)}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(default_config(roots), indent=2) + "\n", encoding="utf-8")
-    return f"Wrote {path}: executor claude, roots {', '.join(roots)}. Check it with: hermes a2a-relay doctor"
+    path.write_text(json.dumps(default_config(roots, executors), indent=2) + "\n", encoding="utf-8")
+    return (f"Wrote {path}: executors {', '.join(executors)} (default {executors[0]}), roots {', '.join(roots)}. "
+            "Check it with: hermes a2a-relay doctor")

@@ -81,7 +81,7 @@ Set up per profile:
 
 ```bash
 npm install -g acpx@0.20.0          # Node >= 22.13
-hermes a2a-relay coder init         # writes $HERMES_HOME/a2a_relay/coder.json (claude, ~/dev); --root <dir>
+hermes a2a-relay coder init         # writes $HERMES_HOME/a2a_relay/coder.json (claude, ~/dev); --root <dir>, --executor opencode
 hermes a2a-relay doctor             # checks acpx, node, executors, roots, timeout; spends no tokens
 ```
 

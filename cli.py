@@ -34,6 +34,8 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
     coder_actions = coder.add_subparsers(dest="coder_action")
     init = coder_actions.add_parser("init", help="Write a default coder.json for this profile (claude, ~/dev)")
     init.add_argument("--root", action="append", default=[], help="Projects directory (repeatable; default ~/dev)")
+    init.add_argument("--executor", action="append", default=[],
+                      help="claude | opencode | codex (repeatable; the first is the default; default claude)")
 
 
 def command(args: argparse.Namespace) -> int:
@@ -51,7 +53,7 @@ def command(args: argparse.Namespace) -> int:
         from .coder import CoderError
         from .coder_doctor import init_config
         try:
-            print(init_config(get_hermes_home() / "a2a_relay", list(args.root)))
+            print(init_config(get_hermes_home() / "a2a_relay", list(args.root), executors=tuple(args.executor)))
         except CoderError as exc:
             print(f"Error: {exc}")
             return 1

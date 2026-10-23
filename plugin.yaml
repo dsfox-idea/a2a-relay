@@ -1,5 +1,5 @@
 name: a2a-relay
-version: 0.7.2
+version: 0.7.3
 description: "Shows every inbound A2A exchange in the active TUI chat and lets the user approve or deny commands that inbound A2A sessions need approval for (/a2a-allow, /a2a-deny)."
 author: "Dmitry Golubnichiy"
 provides_hooks:
