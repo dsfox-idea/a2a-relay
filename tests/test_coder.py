@@ -152,6 +152,26 @@ class ScopeTests(unittest.TestCase):
             self.scope.project_of(str(link))
 
 
+class WorktreeTests(unittest.TestCase):
+    def test_real_worktree_gets_a_branch_and_no_claude_attribution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            repo = make_repo(root / "proj")
+            tree = coder.Worktree([root])
+            path, branch, base = tree.create(repo, "code-1")
+            self.assertEqual(path, root / coder.WORKTREES_DIR / "proj-code-1")
+            self.assertEqual(branch, "a2a/code-1")
+            settings = json.loads((path / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+            self.assertEqual(settings["attribution"], {"commit": "", "pr": ""})
+            status = subprocess.run(["git", "-C", str(path), "status", "--porcelain"], capture_output=True, text=True)
+            self.assertEqual(status.stdout.strip(), "", "the setting is git-excluded, never committed")
+            tree._no_attribution(path)
+            exclude = (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+            self.assertEqual(exclude.count("/.claude/settings.local.json"), 1, "added once")
+            self.assertIn("(нет)", tree.summary(path, base))
+            subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(path)], check=True)
+
+
 class FakeRunner:
     def __init__(self, fixture="ok", exit_code=0, gate=None, prepare_code=0):
         self.fixture, self.exit_code, self.gate, self.prepare_code = fixture, exit_code, gate, prepare_code
@@ -218,6 +238,7 @@ class BoardTests(unittest.TestCase):
         self.assertIn("hello.txt | 1 +", text)
         argv, brief = self.runner.prompts[0]
         self.assertIn("Do not ask questions", brief)
+        self.assertIn("no Co-Authored-By", brief, "commits stay under the owner's identity")
         self.assertIn(str(self.worktree.created[0]), argv)
         modes = [c for c in self.runner.calls if "set-mode" in c]
         self.assertEqual(modes[0][-4:], ["set-mode", "default", "-s", job.session], "auto mode ignores permissions")

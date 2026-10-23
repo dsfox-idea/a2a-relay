@@ -41,7 +41,9 @@ MAX_KEPT = 100
 MAX_REPLY_CHARS = 4000
 MAX_WAIT_SECONDS = 360
 BRIEF_SUFFIX = ("\n\n[Do not ask questions: nobody can answer them. Decide yourself and list your decisions in the "
-                "reply. Work only inside the current directory; it is a git worktree on its own branch.]")
+                "reply. Work only inside the current directory; it is a git worktree on its own branch. Commit as "
+                "the git user configured in the repository and add no Co-Authored-By or other attribution "
+                "trailers.]")
 _REPLY_HEADER = "[a2a-relay: результат кодинг-агента по задаче из этого чата (code_send)]"
 _CANCEL_GRACE, _KILL_GRACE = 30.0, 10.0
 
@@ -294,7 +296,39 @@ class Worktree:
         made = self._run(["git", "-C", str(project), "worktree", "add", "-b", branch, str(path), "HEAD"])
         if made.returncode != 0:
             raise CoderError(f"git worktree add failed: {made.stderr.strip()[:300]}")
+        self._no_attribution(path)
         return path, branch, base.stdout.strip()
+
+    def _no_attribution(self, path: Path) -> None:
+        """Commits stay the owner's alone: Claude Code adds a Co-Authored-By trailer unless its own settings say
+        otherwise, and a brief cannot enforce that (checked live). The file is a local, git-excluded setting."""
+        settings = path / ".claude" / "settings.local.json"
+        tracked = self._run(["git", "-C", str(path), "ls-files", "--error-unmatch", ".claude/settings.local.json"])
+        if tracked.returncode == 0:
+            logger.warning("a2a-relay: %s tracks .claude/settings.local.json; attribution left as is", path)
+            return
+        try:
+            data = json.loads(settings.read_text(encoding="utf-8")) if settings.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        data["attribution"] = {"commit": "", "pr": ""}
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        exclude = self._run(["git", "-C", str(path), "rev-parse", "--git-path", "info/exclude"])
+        target = Path(exclude.stdout.strip()) if exclude.returncode == 0 and exclude.stdout.strip() else None
+        if target is None:
+            return
+        target = target if target.is_absolute() else path / target
+        line = "/.claude/settings.local.json"
+        try:
+            current = target.read_text(encoding="utf-8") if target.exists() else ""
+            if line not in current.splitlines():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("a", encoding="utf-8") as fh:
+                    fh.write(("" if not current or current.endswith("\n") else "\n") + line + "\n")
+        except OSError:
+            logger.warning("a2a-relay: could not exclude %s in %s", line, target, exc_info=True)
 
     def summary(self, path: Path, base: str) -> str:
         log = self._run(["git", "-C", str(path), "log", "--oneline", f"{base}..HEAD"])
