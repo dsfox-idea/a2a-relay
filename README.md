@@ -57,6 +57,46 @@ prompt goes nowhere: the A2A adapter drops non-final sends, and the command is d
 - **Commands.** `/a2a-allow [id]`, `/a2a-deny [id] [reason]`, `/a2a-pending`, `/a2a-trust`. Any of them
   also makes the current chat the feed target.
 
+## Coding executors (acpx)
+
+Hermes can hand a coding task to an external coding agent (Claude Code, OpenCode, ...) through
+[acpx](https://github.com/openclaw/acpx) and get the result back in the chat, like `a2a_send`.
+
+- `code_send(task, executor?, session?)` returns a job id at once. The agent works in **the caller's own
+  project only**: the git root of the calling session's working directory, inside one of the configured
+  roots. A session outside a git repo (or outside the roots) gets no coding. Each job gets its own
+  `git worktree` at `<root>/.a2a-worktrees/<repo>-<job>` on branch `a2a/<job>`; your checkout is never
+  touched and worktrees are never removed automatically. Pass `session` from an earlier job to continue it.
+- `code_task(job?)` shows the jobs of this project; `code_cancel(job)` cancels through acpx, then
+  terminates (30 s) and kills (10 s) if needed; `code_wait(job, seconds<=360)` lets an A2A session poll,
+  since its result cannot be delivered into a chat.
+- The result message has the state, the agent's reply (4000 chars; full transcript in
+  `$HERMES_HOME/a2a_relay/code/<job>.ndjson`), the branch, new commits and `git diff --stat`.
+- Jobs are kept on disk; after a gateway restart an unfinished job is reported as interrupted, with the
+  acpx session to continue.
+- Trust levels: inbound A2A sessions at levels 0-2 may use it in their own project, level 3 may not,
+  level 4 only after your "да".
+
+Set up per profile:
+
+```bash
+npm install -g acpx@0.20.0          # Node >= 22.13
+hermes a2a-relay coder init         # writes $HERMES_HOME/a2a_relay/coder.json (claude, ~/dev); --root <dir>
+hermes a2a-relay doctor             # checks acpx, node, executors, roots, timeout; spends no tokens
+```
+
+`coder.json`: `executors`, `default_executor`, `roots`, `timeout_s` (default 3600),
+`permissions` (`approve-all` | `approve-reads` | `deny-all`), `session_modes`.
+
+Limits:
+- The agent's commands do not go through Hermes' approval prompts; `--cwd` only guards ACP file methods.
+  The worktree and the roots protect against mistakes, not against a hostile agent.
+- `session_modes.claude` must not be `auto`: in that mode claude-agent-acp never asks for permission, so
+  every permission mode is void (`doctor` fails it).
+- The agent cannot ask questions in the middle of a job; write a complete brief.
+- Transcripts contain account data (the Claude account e-mail): they stay under `$HERMES_HOME`.
+- Claude through acpx uses your own Claude subscription on your own machines; do not share that access.
+
 ## Install
 
 On every machine (macOS, Linux, Windows), with A2A already set up between them:

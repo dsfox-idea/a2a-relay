@@ -57,6 +57,7 @@ class HostFacts:
         self.default_routes = default_routes or {}
         self.plugin_enabled_in: Callable[[Path], bool] = _plugin_enabled_in
         self.fleet = None  # fleet.Fleet of the active profile, when the plugin could build one
+        self.coder: Callable[[], list] = lambda: []  # coding executor checks (coder_doctor.CoderDoctor.run)
 
     @classmethod
     def live(cls) -> "HostFacts":
@@ -87,6 +88,9 @@ class HostFacts:
             facts.fleet = build_fleet()
         except ValueError:
             pass
+        from hermes_constants import get_hermes_home
+        from .coder_doctor import CoderDoctor
+        facts.coder = CoderDoctor(get_hermes_home() / "a2a_relay").run
         return facts
 
 
@@ -168,6 +172,7 @@ class Doctor:
         else:
             checks.append(self.profile_route())
         checks += [self.a2a_toolset(), self.peer_timeouts(), self.local_injection_fix(), self.fleet()]
+        checks.extend(self.facts.coder())
         if probe_peers:
             checks.extend(self.peers())
         if self.is_default_profile:

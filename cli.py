@@ -30,6 +30,10 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
     join.add_argument("code")
     actions.add_parser("sync", help="Write the tokens and peer entries this profile needs")
     actions.add_parser("prune", help="Drop pre-fleet inbound tokens of members")
+    coder = sub.add_parser("coder", help="Coding executors through acpx (code_send)")
+    coder_actions = coder.add_subparsers(dest="coder_action")
+    init = coder_actions.add_parser("init", help="Write a default coder.json for this profile (claude, ~/dev)")
+    init.add_argument("--root", action="append", default=[], help="Projects directory (repeatable; default ~/dev)")
 
 
 def command(args: argparse.Namespace) -> int:
@@ -42,7 +46,17 @@ def command(args: argparse.Namespace) -> int:
         return 1 if any(c.failed for c in checks) else 0
     if action == "setup":
         return Setup(args.yes, probe_peers=not args.no_network).run()
-    print("Usage: hermes a2a-relay {doctor|setup|fleet}")
+    if action == "coder" and getattr(args, "coder_action", None) == "init":
+        from hermes_constants import get_hermes_home
+        from .coder import CoderError
+        from .coder_doctor import init_config
+        try:
+            print(init_config(get_hermes_home() / "a2a_relay", list(args.root)))
+        except CoderError as exc:
+            print(f"Error: {exc}")
+            return 1
+        return 0
+    print("Usage: hermes a2a-relay {doctor|setup|fleet|coder init}")
     return 2
 
 
