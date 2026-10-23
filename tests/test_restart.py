@@ -47,13 +47,22 @@ class RestartTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def tool(self, runner, results=None):
+    def tool(self, runner, results=None, alive=lambda pid: False):
         results = list(results or [])
 
         def inject(key, text):
             self.sent.append((key, text))
             return results.pop(0) if results else True
-        return restart.GatewayRestart(self.marker, inject, runner=lambda: runner, retry_seconds=0)
+        # settle_seconds is huge so the background settle thread never fires during a test; _settle is
+        # called directly where it matters.
+        return restart.GatewayRestart(self.marker, inject, runner=lambda: runner, retry_seconds=0, alive=alive,
+                                      settle_seconds=10_000)
+
+    def write_marker(self, **extra):
+        self.marker.write_text(json.dumps({"session_key": "k", "pid": -1, "ts": 0, **extra}), encoding="utf-8")
+
+    def marker_data(self):
+        return json.loads(self.marker.read_text(encoding="utf-8"))
 
     def test_request_goes_through_the_gateway_loop_and_leaves_a_marker(self):
         runner = FakeRunner()
@@ -89,29 +98,54 @@ class RestartTests(unittest.TestCase):
             runner.close()
 
     def test_new_process_announces_once_and_retries_until_the_chat_is_back(self):
-        self.marker.write_text(json.dumps({"session_key": "k", "pid": -1, "ts": 0}), encoding="utf-8")
+        self.write_marker()
         tool = self.tool(object(), results=[False, False, True])
         tool._clock = lambda: 25.0
         self.assertTrue(tool.announce())
         self.assertEqual(len(self.sent), 3)
         self.assertIn("было PID -1", self.sent[-1][1])
         self.assertIn("через 25 с", self.sent[-1][1])
-        self.assertFalse(self.marker.exists())
+        self.assertNotIn("Предыдущее", self.sent[-1][1])
+        self.assertEqual(self.marker_data()["announced_by"], os.getpid(), "kept until this gateway settles")
         self.assertFalse(tool.announce(), "announced only once")
+        self.assertTrue(tool._settle())
+        self.assertFalse(self.marker.exists())
 
     def test_waits_for_the_runner_that_appears_after_plugin_load(self):
-        self.marker.write_text(json.dumps({"session_key": "k", "pid": -1, "ts": 0}), encoding="utf-8")
+        self.write_marker()
         runners = [None, None, object()]
         tool = restart.GatewayRestart(self.marker, lambda key, text: self.sent.append((key, text)) or True,
                                       runner=lambda: runners.pop(0) if len(runners) > 1 else runners[0],
-                                      retry_seconds=0)
+                                      retry_seconds=0, alive=lambda pid: False, settle_seconds=10_000)
         tool._clock = lambda: 20.0
         self.assertTrue(tool._announce_when_gateway())
         self.assertEqual([key for key, _ in self.sent], ["k"])
-        self.assertFalse(self.marker.exists())
+
+    def test_announcer_killed_before_settling_is_replaced_by_the_next_gateway(self):
+        """#12: a client-started gateway announces, then the restart watcher kills it."""
+        self.write_marker(announced_by=40148, announced_at=10)
+        tool = self.tool(object(), alive=lambda pid: False)
+        tool._clock = lambda: 40.0
+        self.assertTrue(tool._announce_when_gateway())
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("PID 40148", self.sent[0][1], "the owner learns the first notice was lost")
+        self.assertEqual(self.marker_data()["announced_by"], os.getpid())
+
+    def test_live_announcer_is_not_duplicated(self):
+        self.write_marker(announced_by=40148, announced_at=10)
+        tool = self.tool(object(), alive=lambda pid: pid == 40148)
+        tool._clock = lambda: 40.0
+        self.assertFalse(tool._announce_when_gateway())
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.marker_data()["announced_by"], 40148)
+
+    def test_settle_keeps_a_marker_another_gateway_took_over(self):
+        self.write_marker(announced_by=40148, announced_at=10)
+        self.assertFalse(self.tool(object())._settle())
+        self.assertTrue(self.marker.exists())
 
     def test_a_process_without_runner_leaves_the_marker(self):
-        self.marker.write_text(json.dumps({"session_key": "k", "pid": -1, "ts": 0}), encoding="utf-8")
+        self.write_marker()
         tool = self.tool(None)
         tool._clock = lambda: 20.0
         self.assertFalse(tool._announce_when_gateway())

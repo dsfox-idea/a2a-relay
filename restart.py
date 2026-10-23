@@ -7,7 +7,10 @@ starts the new process. A ``hermes gateway restart`` run from the agent's own te
 the process tree it runs in.
 
 When the request came from an owner chat, the new gateway process announces itself in that chat, so
-the agent re-checks whatever it was waiting on.
+the agent re-checks whatever it was waiting on. On Windows a client may auto-start a gateway before
+the restart watcher replaces it with yet another one (#12), killing the turn the notice started; so
+the marker outlives the delivery until the announcing gateway has stayed up for a while, and a later
+gateway that finds the announcer dead announces again.
 """
 
 from __future__ import annotations
@@ -28,9 +31,18 @@ logger = logging.getLogger("a2a_relay")
 _ANNOUNCE_TRIES = 60
 _ANNOUNCE_EVERY = 5.0
 _MARKER_MAX_AGE = 3600.0
+_SETTLE_SECONDS = 180.0  # the announcing gateway must live this long before its notice counts as delivered
+_LOST_TEXT = ("\nПредыдущее такое уведомление ушло в gateway PID {lost}, но его тоже перезапустили, так что "
+              "ход по нему мог прерваться.")
 _BACK_TEXT = ("[a2a-relay: gateway перезапущен по запросу из этого чата (было PID {old}, теперь {new}, "
               "через {took} с)]\nПроверь всё, чего ты ждал: свои фоновые процессы, пиров, незаконченные шаги. "
               "Это служебное сообщение плагина, а не сообщение владельца.")
+
+
+def _pid_alive(pid: int) -> bool:
+    # Never os.kill(pid, 0) on Windows: it sends CTRL_C to the console group (bpo-14484).
+    from hermes_cli._subprocess_compat import pid_exists_stdlib
+    return bool(pid_exists_stdlib(int(pid)))
 
 
 def _gateway_runner():
@@ -45,12 +57,15 @@ def _gateway_runner():
 class GatewayRestart:
     def __init__(self, marker: Path, inject: Callable[[str, str], bool],
                  runner: Callable[[], object] = _gateway_runner, clock: Callable[[], float] = time.time,
-                 retry_seconds: float = _ANNOUNCE_EVERY):
+                 retry_seconds: float = _ANNOUNCE_EVERY, alive: Callable[[int], bool] = _pid_alive,
+                 settle_seconds: float = _SETTLE_SECONDS):
         self.marker = Path(marker)
         self._inject = inject
         self._runner = runner
         self._clock = clock
         self._retry_seconds = retry_seconds
+        self._alive = alive
+        self._settle_seconds = settle_seconds
 
     # -- request ---------------------------------------------------------------------------------
     def request(self, announce_to: str = "") -> str:
@@ -112,11 +127,20 @@ class GatewayRestart:
 
     # -- announcement ------------------------------------------------------------------------------
     def _write_marker(self, session_key: str) -> None:
+        self._save({"session_key": session_key, "pid": os.getpid(), "ts": self._clock()})
+
+    def _save(self, data: dict) -> None:
         self.marker.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.marker.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"session_key": session_key, "pid": os.getpid(), "ts": self._clock()}),
-                       encoding="utf-8")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
         os.replace(tmp, self.marker)
+
+    def _load(self) -> Optional[dict]:
+        try:
+            data = json.loads(self.marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
 
     def _drop_marker(self) -> None:
         try:
@@ -125,15 +149,16 @@ class GatewayRestart:
             pass
 
     def pending_announcement(self) -> Optional[dict]:
-        """The marker left by a previous gateway process, if it is recent; None otherwise."""
-        try:
-            data = json.loads(self.marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if data.get("pid") == os.getpid():
+        """The marker left by a previous gateway process, if it is recent and no live gateway has
+        announced it yet; None otherwise."""
+        data = self._load()
+        if data is None or data.get("pid") == os.getpid():
             return None
         if self._clock() - float(data.get("ts") or 0) > _MARKER_MAX_AGE:
             self._drop_marker()
+            return None
+        announcer = data.get("announced_by")
+        if announcer is not None and (announcer == os.getpid() or self._alive(int(announcer))):
             return None
         return data
 
@@ -141,18 +166,23 @@ class GatewayRestart:
         """Called at plugin load: post the "back" notice once this process turns out to be the gateway.
 
         The plugin loads a few seconds before the gateway runner exists, so the thread waits for it."""
-        if self.pending_announcement() is None:
+        data = self._load()
+        if data is None or data.get("pid") == os.getpid() or data.get("announced_by") == os.getpid():
             return
         threading.Thread(target=self._announce_when_gateway, daemon=True, name="a2a-relay-restart-notice").start()
 
     def _announce_when_gateway(self) -> bool:
+        """Wait until this process is the gateway and no live gateway has announced already: an
+        announcer that is being stopped may still be alive when this plugin loads."""
         for attempt in range(_ANNOUNCE_TRIES):
-            if self._runner() is not None:
+            if not self.marker.exists():
+                return False
+            if self._runner() is not None and self.pending_announcement() is not None:
                 return self.announce()
             if attempt + 1 < _ANNOUNCE_TRIES:
                 time.sleep(self._retry_seconds)
-        # Not the gateway (TUI, a CLI command): leave the marker for the gateway process.
-        logger.debug("a2a-relay: no gateway runner in this process; restart notice left for the gateway")
+        # Not the gateway (TUI, a CLI command), or the announcer lives on: leave the marker.
+        logger.debug("a2a-relay: restart notice not announced by this process; marker left")
         return False
 
     def announce(self) -> bool:
@@ -161,11 +191,16 @@ class GatewayRestart:
             return False
         text = _BACK_TEXT.format(old=data.get("pid"), new=os.getpid(),
                                  took=int(self._clock() - float(data.get("ts") or 0)))
+        lost = data.get("announced_by")
+        if lost is not None:
+            text += _LOST_TEXT.format(lost=lost)
         for attempt in range(_ANNOUNCE_TRIES):
             try:
                 if self._inject(str(data["session_key"]), text):
-                    self._drop_marker()
-                    logger.info("a2a-relay: restart notice delivered to %s", data["session_key"])
+                    self._save({**data, "announced_by": os.getpid(), "announced_at": self._clock()})
+                    logger.info("a2a-relay: restart notice delivered to %s%s", data["session_key"],
+                                f" (again: gateway {lost} died after announcing)" if lost is not None else "")
+                    threading.Thread(target=self._settle_later, daemon=True, name="a2a-relay-restart-settle").start()
                     return True
             except Exception:
                 logger.debug("a2a-relay: restart notice not delivered yet", exc_info=True)
@@ -174,6 +209,20 @@ class GatewayRestart:
         logger.warning("a2a-relay: restart notice for %s was never accepted", data.get("session_key"))
         self._drop_marker()
         return False
+
+    def _settle_later(self) -> None:
+        time.sleep(self._settle_seconds)
+        self._settle()
+
+    def _settle(self) -> bool:
+        """Drop the marker once this gateway has outlived the restart; if it dies first, the marker
+        stays and the next gateway announces again."""
+        data = self._load()
+        if data is None or data.get("announced_by") != os.getpid():
+            return False
+        self._drop_marker()
+        logger.info("a2a-relay: restart notice settled (gateway %s stayed up)", os.getpid())
+        return True
 
 
 def _via_service() -> bool:
