@@ -94,6 +94,10 @@ Limits:
 - `session_modes.claude` must not be `auto`: in that mode claude-agent-acp never asks for permission, so
   every permission mode is void (`doctor` fails it).
 - The agent cannot ask questions in the middle of a job; write a complete brief.
+- acpx starts the adapter through `npm exec`. On a machine with a cold npm cache the first job can fail
+  with "acpx could not open session" (seen on macOS: the 180 s session-open limit ran out while npm
+  fetched the adapter). Retry, or warm the cache once:
+  `npm exec --yes --package=@agentclientprotocol/claude-agent-acp@^0.81.2 -- node -e 0`.
 - Transcripts contain account data (the Claude account e-mail): they stay under `$HERMES_HOME`.
 - Claude through acpx uses your own Claude subscription on your own machines; do not share that access.
 
