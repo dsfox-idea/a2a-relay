@@ -428,16 +428,25 @@ class ApprovalIntegrationTests(unittest.TestCase):
         self.assertEqual(out.get("choice"), "deny")
         self.assertEqual(out.get("reason"), "не сейчас")
 
-    def test_other_text_closes_the_window(self):
+    def test_other_text_keeps_the_window_open(self):
+        """m5 2026-10-24: the owner typed "дв", then "да"; the "да" must still count."""
         interp = self._interpreter()
         out = self._wait_in_thread("agent:main:a2a:dm:ctx-o", "make install")
         req = self._wait_published()
         interp.note_asked([req["request_id"]])
+        self.assertIsNone(interp.on_user_message("дв"))
         self.assertIsNone(interp.on_user_message("а что это за команда?"))
-        self.assertIsNone(interp.on_user_message("да"))  # too late: only the first reply counts
-        self.assertEqual(len(self.desk.pending()), 1)
-        self.desk.decide("", approvals.DENY)
+        context = interp.on_user_message("да")
         out["_thread"].join(5)
+        self.assertEqual(out.get("choice"), "once")
+        self.assertIn("применено кодом плагина", context)
+        self.assertIsNone(interp.on_user_message("да"), "the window closes once answered")
+
+    def test_expired_request_leaves_the_window_silently(self):
+        interp = self._interpreter()
+        interp.note_asked(["deadbeef" * 4])  # never published: not pending
+        self.assertIsNone(interp.on_user_message("какая погода?"))
+        self.assertIsNone(interp.on_user_message("да"), "a later unrelated yes is not reported as a decision")
 
     def test_parse_answer(self):
         parse = sys.modules["a2a_relay_under_test.replies"].parse_answer

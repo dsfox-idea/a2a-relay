@@ -1,8 +1,9 @@
 """Plain "да"/"нет" answers to A2A approval prompts.
 
 The decision is made here, in code, from the user's own message text — never by the model — so a
-peer's text cannot talk the agent into approving. A reply counts only when it is the user's first
-message after an approval prompt was delivered to the chat and exactly one asked request is pending.
+peer's text cannot talk the agent into approving. A bare yes/no counts while an approval prompt shown
+in this chat is still pending (until it is answered or expires) and exactly one such request is pending;
+other messages in between do not close the window.
 """
 
 from __future__ import annotations
@@ -49,12 +50,18 @@ class ReplyInterpreter:
         """Context for the model when the message was handled as a decision (or was ambiguous)."""
         if not isinstance(text, str) or text.lstrip().startswith(_RELAY_HEADER):
             return None  # relay's own injected turn
-        with self._lock:
-            asked, self._asked = set(self._asked), set()  # any user message ends the "just asked" window
-        if not asked:
-            return None
         answer = parse_answer(text)
         if answer is None:
+            # Other text keeps the window open until the request is answered or expires: a typo before the "да"
+            # cost the owner a request on m5 (2026-10-24, "дв" then "да"). Requests no longer pending drop out.
+            with self._lock:
+                if self._asked:
+                    live = {r["request_id"] for r in self._desk.pending()}
+                    self._asked &= live
+            return None
+        with self._lock:
+            asked, self._asked = set(self._asked), set()
+        if not asked:
             return None
         pending = [r for r in self._desk.pending() if r["request_id"] in asked]
         if not pending:
