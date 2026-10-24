@@ -86,6 +86,18 @@ class ToolGateTests(Env):
         self.assertIsNone(self.call("terminal", command="brew install jq"))
         self.assertIsNone(self.call("a2a_call", agent="m5", message="x"))
 
+    def test_clarify_is_refused_at_every_level(self):
+        """m4 2026-10-24: clarify in an A2A session waited 3600 s for an answer nobody could give."""
+        for level in (0, 1, 2, 3, 4):
+            self.set_level(level)
+            result = self.call("clarify", questions=[{"question": "Install?"}])
+            self.assertEqual((result or {}).get("action"), "block", level)
+            self.assertIn("Do not ask", result["message"])
+
+    def test_clarify_outside_a2a_is_untouched(self):
+        self.a2a = False
+        self.assertIsNone(self.call("clarify", questions=[{"question": "x"}]))
+
     def test_level1_escalates_system_changes_only(self):
         self.set_level(1)
         self.assertIsNone(self.call("terminal", command="npm install"))
