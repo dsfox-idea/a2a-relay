@@ -116,6 +116,7 @@ def register(ctx) -> None:
         return restarter.request(announce_to=chats.key_for_session(session_id))
 
     _register_tools(ctx, a2a_send, a2a_task, gateway_restart)
+    _register_sessions(ctx)
     coding = CodingTools(lambda: profile_home() / "a2a_relay", inject, chats.key_for_session)
     coding.register(ctx, _schema)
     coding.reconcile_in_background()
@@ -188,6 +189,63 @@ def _register_tools(ctx, a2a_send, a2a_task, gateway_restart) -> None:
                    "restart another machine, ask its agent (a2a_call) to call this tool.")
     ctx.register_tool(name="gateway_restart", toolset="a2a-relay", handler=gateway_restart, description=restart_doc,
                       emoji="\u267b", schema=schema("gateway_restart", restart_doc, {}, []))
+
+
+def _register_sessions(ctx) -> None:
+    """#5: serve this machine's open sessions to the fleet and list every machine's (``sessions_list``)."""
+    from .cli import build_fleet
+    from .restart import _gateway_runner
+    from .sessions import FleetAuth, LocalSessions, SessionDirectory, SessionServer, sessions_url
+
+    def fleet():
+        return build_fleet()
+
+    def machine() -> str:
+        try:
+            return fleet().me
+        except ValueError:
+            return ""
+
+    def members() -> dict:
+        try:
+            return fleet().members()
+        except ValueError:
+            return {}
+
+    def address():
+        url = members().get(machine())
+        if not url:
+            return None
+        from urllib.parse import urlsplit
+        parts = urlsplit(sessions_url(url))
+        return (parts.hostname, parts.port) if parts.hostname and parts.port else None
+
+    local = LocalSessions(machine)
+    auth = FleetAuth(fleet)
+    SessionServer(local, auth).start_when_gateway(_gateway_runner, address)
+    directory = SessionDirectory(local, auth, members)
+
+    def sessions_list(args: dict, **_) -> str:
+        idle = args.get("idle")
+        try:
+            return directory.describe(machine=str(args.get("machine") or "").strip(),
+                                      repo=str(args.get("repo") or "").strip(),
+                                      profile=str(args.get("profile") or "").strip(),
+                                      idle=idle if isinstance(idle, bool) else None)
+        except ValueError as exc:
+            return f"Error: {exc}"
+
+    doc = ("List the owner's open Hermes chat sessions on every fleet machine (this one included): machine, "
+           "profile, idle/working, repo@branch or cwd, title, session id, last message. Use it to find the "
+           "chat that works on a given project before handing it work. Unreachable machines are listed too.")
+    text = lambda description: {"type": "string", "description": description}  # noqa: E731
+    ctx.register_tool(name="sessions_list", toolset="a2a-relay", handler=sessions_list, description=doc,
+                      emoji="\U0001f5c2", schema=_schema("sessions_list", doc, {
+                          "machine": text("Only this machine (A2A node name, e.g. m4)."),
+                          "repo": text("Only sessions whose git repo name contains this."),
+                          "profile": text("Only this Hermes profile (default, growser, ...)."),
+                          "idle": {"type": "boolean", "description": "true: only idle chats; false: only busy ones."},
+                      }, []))
 
 
 def _ensure_poller(feed: FeedRelay) -> None:
