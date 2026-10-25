@@ -145,10 +145,65 @@ _SYSTEM_COMMANDS = tuple(re.compile(p) for p in (
     r"\bhermes\s+(?:-p\s+\S+\s+)?(?:update\b|plugins?\s+(?:install|enable|disable|remove|uninstall|update)\b|"
     r"config\s+(?:set|edit|migrate)\b|tools\b|setup\b|a2a-relay\s+(?:setup|fleet\s+sync)\b)",
     r"(?:^|[/\\\s'\"])(?:config\.yaml|\.env|soul\.md)\b",
-    r"\ba2a_relay\b",
 ))
 _PROTECTED_FILES = frozenset({"config.yaml", ".env", "soul.md"})
 _RELAY_DIR = "a2a_relay"
+_RELAY_WORD = re.compile(r"\ba2a_relay\b", re.IGNORECASE)
+# Commands that cannot write files on their own (output redirects are checked separately).
+_RELAY_READERS = frozenset({"ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "find", "stat",
+                            "jq", "echo", "cd", "pwd", "du", "test", "true"})
+_FIND_WRITES = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})
+_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&", "(", ")", ";;"})
+
+
+def _writes_relay_dir(command: str) -> bool:
+    """True when a command that names ``a2a_relay`` may write: anything but plain reads (#15).
+
+    A command that mentions the directory anywhere is allowed only when EVERY part of it is a read
+    (``cd ~/.hermes/a2a_relay && echo x > trust.json`` names the directory in a harmless part and writes in
+    another), output goes nowhere but /dev/null or another descriptor, and nothing is substituted."""
+    if not _RELAY_WORD.search(command):
+        return False
+    if "`" in command or "$(" in command or "${" in command:
+        return True
+    try:
+        lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return True
+    segment: list[str] = []
+    expect: Optional[str] = None  # "file": the redirect target must be /dev/null; "fd": a descriptor
+    for token in tokens + [";"]:
+        if expect is not None:
+            if (expect == "file" and token != "/dev/null") or (expect == "fd" and not re.fullmatch(r"\d+|-", token)):
+                return True
+            expect = None
+            continue
+        if token in (">", ">>", "&>", "&>>", ">|"):
+            expect = "file"
+        elif token == ">&":
+            expect = "fd"
+        elif token.startswith(">") or token.startswith("<<"):
+            return True  # other redirect forms, heredocs: not worth parsing
+        elif token in _SEPARATORS:
+            if segment and _segment_writes(segment):
+                return True
+            segment = []
+        elif token != "<":
+            segment.append(token)
+    return False
+
+
+def _segment_writes(words: list[str]) -> bool:
+    head, rest = Path(words[0]).name.lower().removesuffix(".exe"), words[1:]
+    if head not in _RELAY_READERS:
+        return True
+    if head == "find":
+        return any(a in _FIND_WRITES for a in rest)
+    if head == "rg":
+        return any(a == "--pre" or a.startswith("--pre=") for a in rest)
+    return False
 
 
 class CommandRules:
@@ -162,7 +217,7 @@ class CommandRules:
         text = (command or "").lower()
         if _PIP_INSTALL.search(text) and not re.search(r"venv[\\/]", text):
             return True
-        return any(p.search(text) for p in _SYSTEM_COMMANDS)
+        return any(p.search(text) for p in _SYSTEM_COMMANDS) or _writes_relay_dir(command or "")
 
     def is_protected_path(self, path: str) -> bool:
         if not path:

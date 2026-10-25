@@ -115,6 +115,21 @@ class ToolGateTests(Env):
                          "approve")
         self.assertIsNone(self.call("write_file", path=str(self.home / "notes.md"), content="x"))
 
+    def test_level1_reads_of_the_relay_dir_pass_writes_are_asked(self):
+        self.set_level(1)
+        for command in ("ls ~/.hermes/a2a_relay/coder.json", "cat ~/.hermes/a2a_relay/trust.json; echo \"exit=$?\"",
+                        "grep -n a2a_relay ~/.hermes/logs/agent.log 2>&1 | tail -40",
+                        "rg -n approv ~/.hermes/a2a_relay/approvals.jsonl", "find ~/.hermes/a2a_relay -name '*.json'",
+                        "cat ~/.hermes/a2a_relay/state.json >/dev/null 2>&1", "jq . < ~/.hermes/a2a_relay/state.json"):
+            self.assertIsNone(self.call("terminal", command=command), command)
+        for command in ("echo '{}' > ~/.hermes/a2a_relay/trust.json", "cd ~/.hermes/a2a_relay && echo x > trust.json",
+                        "cat a | tee ~/.hermes/a2a_relay/trust.json", "sed -i s/1/0/ ~/.hermes/a2a_relay/trust.json",
+                        "rm -rf ~/.hermes/a2a_relay/decisions", "cp x ~/.hermes/a2a_relay/trust.json",
+                        "python3 -c 'open(\"a2a_relay/trust.json\",\"w\")'", "find ~/.hermes/a2a_relay -delete",
+                        "cat $(echo a2a_relay/x)", "echo x >> ~/.hermes/A2A_RELAY/trust.json",
+                        "cat <<EOF > a2a_relay/trust.json", "ls a2a_relay\nrm a2a_relay/trust.json"):
+            self.assertEqual((self.call("terminal", command=command) or {}).get("action"), "approve", command)
+
     def test_level2_allow_list_and_no_forwarding(self):
         self.set_level(2)
         self.policy.set_allow_list(["brew install jq*"])
