@@ -65,7 +65,7 @@ class LocalSessions:
 
     def __init__(self, machine: Callable[[], str], live: Optional[Callable[[], list[dict]]] = None):
         self._machine = machine
-        self._live = live or _gateway_chats
+        self._live = live or _all_chats
 
     def cards(self) -> list[dict]:
         cards = []
@@ -84,6 +84,63 @@ class LocalSessions:
 def _profile_name(home: str) -> str:
     path = Path(str(home))
     return path.name if path.parent.name == "profiles" else "default"
+
+
+def merge_chats(*sources: list[dict]) -> list[dict]:
+    """One card per chat: a chat known to several registries is listed once (first source wins)."""
+    seen: set[str] = set()
+    merged = []
+    for chats in sources:
+        for chat in chats:
+            names = {str(chat.get(k) or "") for k in ("id", "session_key")} - {""}
+            if names & seen:
+                continue
+            seen |= names
+            merged.append(chat)
+    return merged
+
+
+def _all_chats() -> list[dict]:
+    # Two registries hold the owner's chats in a gateway process: the session authorities (LOCAL sessions,
+    # e.g. the Windows TUI) and tui_gateway.server._sessions (TUI windows attached to the shared gateway over
+    # its websocket, e.g. on macOS). 0.8.1 read only the first one and missed m5's windows (#5).
+    return merge_chats(_safe(_gateway_chats), _safe(_tui_chats))
+
+
+def _safe(source: Callable[[], list[dict]]) -> list[dict]:
+    try:
+        return source()
+    except Exception:
+        logger.warning("a2a-relay: could not list chats from %s", getattr(source, "__name__", source), exc_info=True)
+        return []
+
+
+def _tui_chats() -> list[dict]:
+    """Chats of TUI/desktop windows served by this process's tui_gateway server."""
+    server = sys.modules.get("tui_gateway.server")
+    if server is None or _gateway_runner_now() is None:
+        return []  # only the gateway process lists; a standalone TUI process is not reachable anyway
+    with server._sessions_lock:
+        live = [(sid, session) for sid, session in server._sessions.items()
+                if isinstance(session, dict) and not session.get("_finalized") and not session.get("_closing")]
+    chats = []
+    for sid, session in live:
+        item = server._session_live_item(sid, session)
+        home = session.get("profile_home")
+        chats.append({"id": sid, "session_key": item.get("session_key") or sid, "title": item.get("title") or "",
+                      "profile": _profile_name(str(home)) if home else "default",
+                      "source": str(session.get("source") or "tui"),
+                      "status": "working" if session.get("running") else "idle",
+                      "model": item.get("model") or "", "cwd": str(session.get("cwd") or ""),
+                      "started_at": float(item.get("started_at") or 0),
+                      "last_active": float(item.get("last_active") or 0),
+                      "preview": str(item.get("preview") or "")[:_PREVIEW]})
+    return chats
+
+
+def _gateway_runner_now():
+    from .restart import _gateway_runner
+    return _gateway_runner()
 
 
 def _gateway_chats() -> list[dict]:
