@@ -30,8 +30,26 @@ logger = logging.getLogger("a2a_relay")
 PORT_OFFSET = 1  # sessions port = A2A port + 1 (9900 -> 9901)
 PEER_TIMEOUT = 5.0
 _PREVIEW = 120
-_server_lock = threading.Lock()
-_server_started = False
+_GUARD_MODULE = "_a2a_relay_sessions_guard"
+
+
+def _process_guard():
+    """One server per process. Every served profile loads its own copy of the plugin (module globals are
+    per copy), and one server already lists all profiles' chats."""
+    import types
+    guard = sys.modules.get(_GUARD_MODULE)
+    if guard is None:
+        guard = sys.modules.setdefault(_GUARD_MODULE, types.ModuleType(_GUARD_MODULE))
+    if not hasattr(guard, "lock"):
+        guard.lock, guard.started = threading.Lock(), False
+    return guard
+
+
+class _ExclusiveServer(ThreadingHTTPServer):
+    # HTTPServer sets SO_REUSEADDR; on Windows that lets a second socket bind the same port (seen live: two
+    # listeners on 9901). The server lives as long as its process, so no TIME_WAIT rebind is needed.
+    allow_reuse_address = sys.platform != "win32"
+    daemon_threads = True
 
 
 def sessions_url(a2a_url: str) -> str:
@@ -41,85 +59,94 @@ def sessions_url(a2a_url: str) -> str:
 
 
 class LocalSessions:
-    """Cards of the live chat sessions in this process."""
+    """Cards of the owner's open chats served by this gateway process."""
 
-    def __init__(self, machine: Callable[[], str], live: Optional[Callable[[], list[tuple[str, dict]]]] = None,
-                 clock: Callable[[], float] = time.time):
+    def __init__(self, machine: Callable[[], str], live: Optional[Callable[[], list[dict]]] = None):
         self._machine = machine
-        self._live = live or _tui_sessions
-        self._clock = clock
+        self._live = live or _gateway_chats
 
     def cards(self) -> list[dict]:
         cards = []
-        for sid, session in self._live():
-            if session.get("_finalized"):
-                continue
+        for raw in self._live():
             try:
-                cards.append(self._card(sid, session))
+                cwd = str(raw.get("cwd") or "")
+                repo, branch = _git(cwd)
+                cards.append({"machine": self._machine(), "cwd": cwd, "repo": repo, "branch": branch, **{
+                    k: raw.get(k, "") for k in ("id", "session_key", "title", "profile", "source", "status", "model",
+                                                "started_at", "last_active", "preview")}})
             except Exception:
-                logger.debug("a2a-relay: no card for session %s", sid, exc_info=True)
+                logger.debug("a2a-relay: no card for session %s", raw.get("id"), exc_info=True)
         return cards
 
-    def _card(self, sid: str, session: dict) -> dict:
-        agent = session.get("agent")
-        key = str(getattr(agent, "session_id", None) or session.get("session_key") or sid)
-        cwd = str(session.get("cwd") or "")
-        repo, branch = _git(cwd)
-        home = session.get("profile_home")
-        return {
-            "machine": self._machine(), "id": sid, "session_key": key, "title": _title(session, key),
-            "profile": Path(home).name if home else "default", "source": str(session.get("source") or ""),
-            "status": _status(sid, session), "model": str(getattr(agent, "model", "") or ""),
-            "cwd": cwd, "repo": repo, "branch": branch,
-            "started_at": float(session.get("created_at") or 0), "last_active": float(session.get("last_active") or 0),
-            "preview": _preview(session),
-        }
+
+def _profile_name(home: str) -> str:
+    path = Path(str(home))
+    return path.name if path.parent.name == "profiles" else "default"
 
 
-def _tui_server():
-    # Never import tui_gateway.server here: only a process that already runs it has live chats.
-    return sys.modules.get("tui_gateway.server")
-
-
-def _tui_sessions() -> list[tuple[str, dict]]:
-    server = _tui_server()
-    if server is None:
+def _gateway_chats() -> list[dict]:
+    """Open owner chats of every profile this gateway serves: LOCAL sessions (TUI, desktop) with a viewer
+    attached, read from the session authorities (``gateway/session_live_listing``'s population)."""
+    from .restart import _gateway_runner
+    runner = _gateway_runner()
+    if runner is None:
         return []
-    with server._sessions_lock:
-        return list(server._sessions.items())
+    from gateway.config import Platform
+    from gateway.session_authorities import all_authorities
+    from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+    chats = []
+    for authority in all_authorities(runner):
+        if authority is None or getattr(authority, "retiring", False) or getattr(authority, "retired", False):
+            continue
+        profile = _profile_name(authority.profile_id)
+        for sid, live in list(authority.sessions.items()):
+            source = getattr(live, "source", None)
+            if source is None or source.platform != Platform.LOCAL or live.superseded or not live.subscribers:
+                continue
+            row = authority.db.get_session_list_row(sid) or {}
+            if row.get("source") in INTERNAL_LISTING_SOURCES or row.get("hidden") or row.get("archived"):
+                continue
+            busy = live.task is not None and not live.task.done()
+            started = float(row.get("started_at") or 0)
+            chats.append({"id": sid, "session_key": live.route, "title": row.get("title") or "", "profile": profile,
+                          "source": row.get("source") or "", "status": "working" if busy else "idle",
+                          "model": row.get("model") or "", "cwd": _session_cwd(runner, source),
+                          "started_at": started, "last_active": _last_active(authority.db, sid) or started,
+                          "preview": _preview(authority.db, sid)})
+    return chats
 
 
-def _status(sid: str, session: dict) -> str:
-    server = _tui_server()
-    probe = getattr(server, "_session_live_status", None)
-    if callable(probe):
-        try:
-            return str(probe(sid, session))
-        except Exception:
-            pass
-    return "working" if session.get("running") else "idle"
+def _session_cwd(runner, source) -> str:
+    try:
+        from gateway.session_policy import policy_for_source
+        policy = policy_for_source(runner, source)
+        return str(policy.cwd) if policy is not None else ""
+    except Exception:
+        return ""
 
 
-def _title(session: dict, key: str) -> str:
-    server = _tui_server()
-    probe = getattr(server, "_session_live_title", None)
-    if callable(probe):
-        try:
-            return str(probe(session, key) or "")
-        except Exception:
-            pass
-    return str(session.get("pending_title") or "")
+def _last_message(db, sid: str) -> Optional[dict]:
+    try:
+        with db._read_ctx() as conn:
+            row = conn.execute("SELECT role, content, timestamp FROM messages WHERE session_id = ? "
+                               "AND role IN ('user', 'assistant') ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
 
 
-def _preview(session: dict) -> str:
-    for msg in reversed(list(session.get("history") or [])):
-        content = msg.get("content", msg.get("text", "")) if isinstance(msg, dict) else ""
-        text = content if isinstance(content, str) else " ".join(
-            str(part.get("text", "")) for part in content if isinstance(part, dict)) if isinstance(content, list) else ""
-        text = " ".join(text.split())
-        if text:
-            return text[:_PREVIEW]
-    return ""
+def _last_active(db, sid: str) -> float:
+    row = _last_message(db, sid)
+    try:
+        return float(row["timestamp"]) if row and row.get("timestamp") else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _preview(db, sid: str) -> str:
+    row = _last_message(db, sid)
+    text = " ".join(str((row or {}).get("content") or "").split())
+    return text[:_PREVIEW]
 
 
 def _git(cwd: str) -> tuple[str, str]:
@@ -186,7 +213,7 @@ class SessionServer:
             def log_message(self, format, *args):  # noqa: A002 (http.server API)
                 logger.debug("a2a-relay sessions: " + format, *args)
 
-        self.httpd = ThreadingHTTPServer((host, port), Handler)
+        self.httpd = _ExclusiveServer((host, port), Handler)
         self.httpd.daemon_threads = True
         threading.Thread(target=self.httpd.serve_forever, daemon=True, name="a2a-relay-sessions").start()
         return self.httpd
@@ -196,17 +223,17 @@ class SessionServer:
         """Bind once per process, after this process turns out to be the gateway (the plugin loads first)."""
 
         def wait() -> None:
-            global _server_started
             for _ in range(tries):
                 if runner() is not None:
                     break
                 time.sleep(every)
             else:
                 return
-            with _server_lock:
-                if _server_started:
+            guard = _process_guard()
+            with guard.lock:
+                if guard.started:
                     return
-                _server_started = True
+                guard.started = True
             where = address()
             if where is None:
                 logger.info("a2a-relay: no fleet address for this machine; sessions port not served")

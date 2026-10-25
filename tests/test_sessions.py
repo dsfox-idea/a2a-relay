@@ -32,37 +32,34 @@ class FakeFleet:
         return {self.me: "http://127.0.0.1:9900", **self._peers}
 
 
-class Agent:
-    def __init__(self, session_id, model="opus"):
-        self.session_id = session_id
-        self.model = model
-
-
-def live(*items):
-    return lambda: list(items)
+def chat(sid, **extra):
+    return {"id": sid, "session_key": f"agent:main:local:dm:{sid}", "title": "", "profile": "default",
+            "source": "tui", "status": "idle", "model": "opus", "cwd": "", "started_at": 1, "last_active": 2,
+            "preview": "", **extra}
 
 
 class LocalSessionsTests(unittest.TestCase):
-    def test_cards_skip_finalized_and_carry_the_fields(self):
-        local = sessions.LocalSessions(lambda: "win", live(
-            ("s1", {"agent": Agent("local-1"), "cwd": "", "source": "tui", "running": True, "created_at": 10,
-                    "last_active": 20, "history": [{"role": "user", "content": "build   the\nthing"}],
-                    "pending_title": "Build"}),
-            ("s2", {"agent": Agent("local-2"), "_finalized": True}),
-            ("s3", {"session_key": "local-3", "profile_home": "/x/profiles/growser",
-                    "history": [{"role": "assistant", "content": [{"type": "text", "text": "done"}]}]}),
-        ))
+    def test_cards_carry_the_fields_and_the_machine(self):
+        local = sessions.LocalSessions(lambda: "win", lambda: [chat("s1", title="Build", status="working"),
+                                                                chat("s3", profile="growser")])
         cards = {c["id"]: c for c in local.cards()}
         self.assertEqual(set(cards), {"s1", "s3"})
-        self.assertEqual((cards["s1"]["session_key"], cards["s1"]["status"], cards["s1"]["title"]),
-                         ("local-1", "working", "Build"))
-        self.assertEqual(cards["s1"]["preview"], "build the thing")
-        self.assertEqual((cards["s3"]["profile"], cards["s3"]["status"], cards["s3"]["preview"]),
-                         ("growser", "idle", "done"))
-        self.assertEqual(cards["s1"]["machine"], "win")
+        self.assertEqual((cards["s1"]["title"], cards["s1"]["status"], cards["s1"]["machine"]),
+                         ("Build", "working", "win"))
+        self.assertEqual((cards["s3"]["profile"], cards["s3"]["repo"]), ("growser", ""))
 
-    def test_no_tui_server_means_no_cards(self):
+    def test_no_gateway_means_no_cards(self):
         self.assertEqual(sessions.LocalSessions(lambda: "win").cards(), [])
+
+    def test_profile_name(self):
+        self.assertEqual(sessions._profile_name("C:/Users/x/AppData/Local/hermes/profiles/growser"), "growser")
+        self.assertEqual(sessions._profile_name("C:/Users/x/AppData/Local/hermes"), "default")
+
+
+class GuardTests(unittest.TestCase):
+    def test_one_server_per_process_across_plugin_copies(self):
+        self.assertIs(sessions._process_guard(), sessions._process_guard())
+        self.assertIs(sessions._process_guard().lock, sessions._process_guard().lock)
 
 
 class AuthTests(unittest.TestCase):
@@ -78,7 +75,7 @@ class AuthTests(unittest.TestCase):
 
 class ServerTests(unittest.TestCase):
     def setUp(self):
-        local = sessions.LocalSessions(lambda: "win", live(("s1", {"agent": Agent("local-1"), "last_active": 5})))
+        local = sessions.LocalSessions(lambda: "win", lambda: [chat("local-1")])
         self.server = sessions.SessionServer(local, sessions.FleetAuth(lambda: FakeFleet()))
         self.httpd = self.server.bind("127.0.0.1", 0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
@@ -101,12 +98,12 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.get("/other", fleet.pair_token(SECRET, "m4", "win"))[0], 404)
         status, body = self.get("/sessions", fleet.pair_token(SECRET, "m4", "win"))
         self.assertEqual(status, 200)
-        self.assertEqual([c["session_key"] for c in body["sessions"]], ["local-1"])
+        self.assertEqual([c["id"] for c in body["sessions"]], ["local-1"])
 
 
 class DirectoryTests(unittest.TestCase):
     def directory(self, http_get, local_cards=()):
-        local = sessions.LocalSessions(lambda: "win", live(*local_cards))
+        local = sessions.LocalSessions(lambda: "win", lambda: list(local_cards))
         fake = FakeFleet()
         return sessions.SessionDirectory(local, sessions.FleetAuth(lambda: fake), fake.members, http_get=http_get)
 
@@ -120,7 +117,7 @@ class DirectoryTests(unittest.TestCase):
                                            "repo": "growser", "profile": "growser", "last_active": 1}]}
             return 0, "timed out"
 
-        directory = self.directory(http_get, [("s1", {"agent": Agent("local-w"), "last_active": 2})])
+        directory = self.directory(http_get, [chat("local-w")])
         cards, problems = directory.collect()
         self.assertEqual(sorted(c["machine"] for c in cards), ["m4", "win"])
         self.assertEqual(problems, {"m5": "no answer (timed out)"})
