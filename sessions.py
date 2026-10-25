@@ -41,7 +41,9 @@ def _process_guard():
     if guard is None:
         guard = sys.modules.setdefault(_GUARD_MODULE, types.ModuleType(_GUARD_MODULE))
     if not hasattr(guard, "lock"):
-        guard.lock, guard.started = threading.Lock(), False
+        # injectors: {profile: inject(session_key, text)}; turns: mail.PeerTurns state; mail: the SessionMail
+        # the one server hands /send and /reply to.
+        guard.lock, guard.started, guard.injectors, guard.turns, guard.mail = threading.Lock(), False, {}, {}, None
     return guard
 
 
@@ -184,14 +186,20 @@ class FleetAuth:
         return None
 
 
+MAX_BODY = 64 * 1024
+
+
 class SessionServer:
-    def __init__(self, local: LocalSessions, auth: FleetAuth):
+    """``GET /sessions``; ``POST /send`` and ``POST /reply`` go to ``mail`` (``mail.SessionMail``), if set."""
+
+    def __init__(self, local: LocalSessions, auth: FleetAuth, mail: Optional[Callable[[], object]] = None):
         self._local = local
         self._auth = auth
+        self._mail = mail or (lambda: None)
         self.httpd: Optional[ThreadingHTTPServer] = None
 
     def bind(self, host: str, port: int) -> ThreadingHTTPServer:
-        local, auth = self._local, self._auth
+        local, auth, mail_of = self._local, self._auth, self._mail
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 (http.server API)
@@ -201,6 +209,33 @@ class SessionServer:
                 if caller is None:
                     return self._send(401, {"error": "fleet token required"})
                 self._send(200, {"sessions": local.cards()})
+
+            def do_POST(self):  # noqa: N802 (http.server API)
+                path = self.path.split("?", 1)[0]
+                mail = mail_of()
+                if path not in ("/send", "/reply") or mail is None:
+                    return self._send(404, {"error": "not found"})
+                caller = auth.caller(self.headers.get("Authorization", ""))
+                if caller is None:
+                    return self._send(401, {"error": "fleet token required"})
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    if not 0 < length <= MAX_BODY:
+                        return self._send(413 if length else 400, {"error": "bad body size"})
+                    body = json.loads(self.rfile.read(length).decode("utf-8"))
+                    if not isinstance(body, dict):
+                        raise ValueError("not an object")
+                except (ValueError, UnicodeDecodeError):
+                    return self._send(400, {"error": "bad json"})
+                try:
+                    if path == "/send":
+                        status, answer = mail.handle_send(caller, body, local.cards())
+                    else:
+                        status, answer = mail.handle_reply(caller, body)
+                except Exception:
+                    logger.warning("a2a-relay: %s from %s failed", path, caller, exc_info=True)
+                    status, answer = 500, {"error": "internal error"}
+                self._send(status, answer)
 
             def _send(self, status: int, body: dict) -> None:
                 data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -267,6 +302,9 @@ class SessionDirectory:
         self._auth = auth
         self._members = members
         self._http_get = http_get
+
+    def local_only(self) -> list[dict]:
+        return list(self._local.cards())
 
     def collect(self) -> tuple[list[dict], dict[str, str]]:
         """(cards, {machine: problem}) for every member."""

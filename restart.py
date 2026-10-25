@@ -83,13 +83,38 @@ def _gateway_runner():
         return None
 
 
+def chats_waiting_on_owner() -> list[str]:
+    """Session keys whose turn is parked on the owner: a clarify question or an approval prompt.
+
+    Hermes' drain does not wait for such a turn: it timed out at once and interrupted a chat that had waited
+    28 min for the owner (win, 2026-10-25, #16)."""
+    waiting: set[str] = set()
+    clarify = sys.modules.get("tools.clarify_gateway")
+    if clarify is not None:
+        try:
+            with clarify._lock:
+                waiting.update(key for key, ids in clarify._session_index.items()
+                               if any(clarify._entries.get(cid) is not None for cid in ids or ()))
+        except Exception:
+            logger.debug("a2a-relay: clarify registry unreadable", exc_info=True)
+    approval = sys.modules.get("tools.approval")
+    if approval is not None:
+        try:
+            with approval._lock:
+                waiting.update(key for key, queue in approval._gateway_queues.items() if queue)
+        except Exception:
+            logger.debug("a2a-relay: approval registry unreadable", exc_info=True)
+    return sorted(waiting)
+
+
 class GatewayRestart:
     def __init__(self, marker: Path, inject: Callable[[str, str], bool],
                  runner: Callable[[], object] = _gateway_runner, clock: Callable[[], float] = time.time,
                  retry_seconds: float = _ANNOUNCE_EVERY, alive: Callable[[int], bool] = _pid_alive,
                  settle_seconds: float = _SETTLE_SECONDS,
                  start_watcher: Optional[Callable[[int], Any]] = (
-                     _spawn_start_watcher if sys.platform == "win32" else None)):
+                     _spawn_start_watcher if sys.platform == "win32" else None),
+                 waiting: Callable[[], list[str]] = chats_waiting_on_owner):
         self.marker = Path(marker)
         self._inject = inject
         self._runner = runner
@@ -98,14 +123,21 @@ class GatewayRestart:
         self._alive = alive
         self._settle_seconds = settle_seconds
         self._start_watcher = start_watcher
+        self._waiting = waiting
 
     # -- request ---------------------------------------------------------------------------------
-    def request(self, announce_to: str = "") -> str:
+    def request(self, announce_to: str = "", force: bool = False) -> str:
         runner = self._runner()
         if runner is None or getattr(runner, "_gateway_loop", None) is None:
             return self._restart_from_outside()
         if getattr(runner, "_restart_requested", False) or getattr(runner, "_draining", False):
             return "A gateway restart is already in progress."
+        waiting = [] if force else self._waiting()
+        if waiting:
+            logger.info("a2a-relay: restart refused, %d chat(s) wait for the owner", len(waiting))
+            return ("Refused: these chats wait for the owner's answer (a question or an approval), and a restart "
+                    "would interrupt them: " + ", ".join(waiting) + ". Restart after they are answered; pass "
+                    "force=true only when the owner agreed to interrupt them.")
         if announce_to:
             self._write_marker(announce_to)
         via_service = _via_service()

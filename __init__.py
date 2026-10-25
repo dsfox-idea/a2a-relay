@@ -64,6 +64,7 @@ def register(ctx) -> None:
     desk = DecisionDesk(paths)
     replies = ReplyInterpreter(desk)
     feed = FeedRelay(paths, inject=inject, can_inject=chats.can_inject, on_asked=replies.note_asked)
+    mail = _register_mail(ctx, chats, inject, profile_home)
 
     def on_pre_llm_call(user_message=None, platform: str = "", session_id: str = "", **_):
         if platform == "a2a" or current_session_is_a2a():
@@ -77,13 +78,15 @@ def register(ctx) -> None:
         _ensure_poller(feed)
         text = user_message if isinstance(user_message, str) else ""
         feed.note_turn(text)  # the relay's own turn: its prompts are on screen now
-        context = replies.on_user_message(text)
+        context = mail.on_turn(session_id, key, text) or replies.on_user_message(text)
         return {"context": context} if context else None
 
     def on_pre_tool_call(tool_name: str = "", session_id: str = "", args=None, **_):
-        if tool_name in _A2A_TOOLS and chats.is_owner_session(session_id):
+        owner = chats.is_owner_session(session_id)
+        if tool_name in _A2A_TOOLS and owner:
             feed.note_own_call(True)
-        return gate.on_pre_tool_call(tool_name=tool_name, args=args)
+        peer_turn = mail.turns.get(session_id) if owner else None
+        return gate.on_pre_tool_call(tool_name=tool_name, args=args, peer_turn=peer_turn)
 
     def on_post_tool_call(tool_name: str = "", session_id: str = "", **_):
         if tool_name in _A2A_TOOLS and chats.is_owner_session(session_id):
@@ -113,10 +116,9 @@ def register(ctx) -> None:
     restarter = GatewayRestart(paths.root / "restart_notice.json", inject)
 
     def gateway_restart(args: dict, session_id: str = "", **_) -> str:
-        return restarter.request(announce_to=chats.key_for_session(session_id))
+        return restarter.request(announce_to=chats.key_for_session(session_id), force=args.get("force") is True)
 
     _register_tools(ctx, a2a_send, a2a_task, gateway_restart)
-    _register_sessions(ctx)
     coding = CodingTools(lambda: profile_home() / "a2a_relay", inject, chats.key_for_session)
     coding.register(ctx, _schema)
     coding.reconcile_in_background()
@@ -186,16 +188,22 @@ def _register_tools(ctx, a2a_send, a2a_task, gateway_restart) -> None:
                    "Waits for running turns, this one included, then restarts; the new process is up 10-30 s "
                    "after your turn ends, and from your own chat you get a notice when it is back. Never run "
                    "`hermes gateway restart` in the terminal instead: that kills the gateway you run in. To "
-                   "restart another machine, ask its agent (a2a_call) to call this tool.")
+                   "restart another machine, ask its agent (a2a_call) to call this tool. Refuses while a chat waits "
+                   "for the owner's answer (a question or an approval): a restart would interrupt it.")
+    force = {"type": "boolean", "description": "Restart even though chats wait for the owner; only when the owner "
+                                               "agreed to interrupt them."}
     ctx.register_tool(name="gateway_restart", toolset="a2a-relay", handler=gateway_restart, description=restart_doc,
-                      emoji="\u267b", schema=schema("gateway_restart", restart_doc, {}, []))
+                      emoji="\u267b", schema=schema("gateway_restart", restart_doc, {"force": force}, []))
 
 
-def _register_sessions(ctx) -> None:
-    """#5: serve this machine's open sessions to the fleet and list every machine's (``sessions_list``)."""
+def _register_mail(ctx, chats: OwnerChats, inject, profile_home):
+    """#5 and #6: sessions_list, session_send, session_reply. Returns the process-wide SessionMail."""
+    from pathlib import Path
     from .cli import build_fleet
+    from .mail import MailStore, PeerTurns, SessionMail
     from .restart import _gateway_runner
-    from .sessions import FleetAuth, LocalSessions, SessionDirectory, SessionServer, sessions_url
+    from .sessions import (FleetAuth, LocalSessions, SessionDirectory, SessionServer, _process_guard,
+                           _profile_name, sessions_url)
 
     def fleet():
         return build_fleet()
@@ -222,8 +230,28 @@ def _register_sessions(ctx) -> None:
 
     local = LocalSessions(machine)
     auth = FleetAuth(fleet)
-    SessionServer(local, auth).start_when_gateway(_gateway_runner, address)
     directory = SessionDirectory(local, auth, members)
+    # Every served profile loads its own plugin copy; the one server and the mail are shared per process,
+    # with each profile's injector and trust level registered here.
+    home = Path(getattr(ctx._manager, "home_path", None) or profile_home())
+    guard = _process_guard()
+    with guard.lock:
+        guard.injectors[_profile_name(str(home))] = inject
+        guard.levels = getattr(guard, "levels", {})
+        guard.levels[_profile_name(str(home))] = TrustPolicy(lambda: home / "a2a_relay").level
+        if guard.mail is None:
+            from hermes_constants import get_default_hermes_root
+            levels = guard.levels
+
+            def level_for(profile: str):
+                level = levels.get(profile) or levels.get("default")
+                return level() if level else TrustPolicy(lambda: home / "a2a_relay").level()
+
+            guard.mail = SessionMail(MailStore(get_default_hermes_root() / "a2a_relay" / "mail"), directory, auth,
+                                     members, guard.injectors.get, level_for, PeerTurns(guard.turns))
+            threading.Thread(target=_sweep_forever, args=(guard.mail,), daemon=True, name="a2a-relay-mail").start()
+    mail = guard.mail
+    SessionServer(local, auth, lambda: _process_guard().mail).start_when_gateway(_gateway_runner, address)
 
     def sessions_list(args: dict, **_) -> str:
         idle = args.get("idle")
@@ -246,6 +274,46 @@ def _register_sessions(ctx) -> None:
                           "profile": text("Only this Hermes profile (default, growser, ...)."),
                           "idle": {"type": "boolean", "description": "true: only idle chats; false: only busy ones."},
                       }, []))
+
+    def session_send(args: dict, session_id: str = "", **_) -> str:
+        return mail.send(chats.key_for_session(session_id), session_id, _profile_name(str(profile_home())),
+                         str(args.get("session") or ""), str(args.get("text") or ""),
+                         machine=str(args.get("machine") or ""))
+
+    def session_reply(args: dict, session_id: str = "", **_) -> str:
+        key = chats.key_for_session(session_id)
+        if not key:
+            return "Error: session_reply works only in the owner chat that received the task."
+        return mail.reply(key, str(args.get("id") or ""), str(args.get("text") or ""))
+
+    send_doc = ("Hand a task to an OPEN owner chat on any fleet machine (find it with sessions_list): it runs there "
+                "in a chat Dmitry sees, in that project's context, and its agent answers with session_reply; the "
+                "answer arrives in THIS chat as a separate message. Returns at once; do not wait. Prefer it to "
+                "a2a_send when a chat already works on the project. A busy chat starts it after its current turn.")
+    ctx.register_tool(name="session_send", toolset="a2a-relay", handler=session_send, description=send_doc,
+                      emoji="\U0001f4ec", schema=_schema("session_send", send_doc, {
+                          "session": text("Target chat: its session id from sessions_list (or a unique tail)."),
+                          "text": text("The task, self-contained: the other chat knows nothing of this one."),
+                          "machine": text("Optional: that chat's machine (A2A node name), to disambiguate."),
+                      }, ["session", "text"]))
+    reply_doc = ("Answer a task another chat sent here with session_send (its message names the id): one message "
+                 "with the result, or why it cannot be done. Only the chat that received the task can answer it.")
+    ctx.register_tool(name="session_reply", toolset="a2a-relay", handler=session_reply, description=reply_doc,
+                      emoji="\U0001f4ec", schema=_schema("session_reply", reply_doc, {
+                          "id": text("The task id (mail-...) from the task message."),
+                          "text": text("The answer for the sender."),
+                      }, ["id", "text"]))
+    return mail
+
+
+def _sweep_forever(mail, every: float = 60.0) -> None:
+    import time
+    while True:
+        time.sleep(every)
+        try:
+            mail.sweep()
+        except Exception:
+            logger.warning("a2a-relay: mail sweep failed", exc_info=True)
 
 
 def _ensure_poller(feed: FeedRelay) -> None:

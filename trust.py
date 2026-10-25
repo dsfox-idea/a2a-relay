@@ -25,10 +25,11 @@ logger = logging.getLogger("a2a_relay")
 
 A2A_PLATFORM = "a2a"
 A2A_SESSION_MARKER = ":a2a:"
-FORWARD_TOOLS = frozenset({"a2a_call", "a2a_send", "a2a_orchestrate"})
+FORWARD_TOOLS = frozenset({"a2a_call", "a2a_send", "a2a_orchestrate", "session_send"})
 ASK_TOOLS = frozenset({"clarify"})
+ANSWER_TOOLS = frozenset({"session_reply"})
 READ_TOOLS = frozenset({"read_file", "search_files", "web_search", "web_extract", "session_search",
-                        "skills_list", "skill_view", "vision_analyze", "a2a_task", "code_task", "code_wait",
+                        "skills_list", "skill_view", "vision_analyze", "a2a_task", "code_task", "code_wait", "sessions_list",
                         "mcp__growser__web_search", "mcp__growser__web_fetch"})
 ESCALATION_RULE = "a2a-trust"
 
@@ -259,10 +260,23 @@ class TrustGate:
         logger.info("a2a-relay: trust level %d %s: %s", level.number, decision, what[:120])
 
     # -- pre_tool_call ----------------------------------------------------------------------------
-    def on_pre_tool_call(self, tool_name: str = "", args: Optional[dict] = None, **_) -> Optional[dict]:
-        if not self._is_a2a():
+    def on_pre_tool_call(self, tool_name: str = "", args: Optional[dict] = None,
+                         peer_turn: Optional[dict] = None, **_) -> Optional[dict]:
+        """``peer_turn``: this owner-chat turn works on a peer's task (``mail.PeerTurns``); the same level
+        applies, but the owner is in the chat, so questions are allowed and the hold is the turn's own yes."""
+        if peer_turn is None and not self._is_a2a():
             return None
         level, args = self._policy.level(), args if isinstance(args, dict) else {}
+        if tool_name in ANSWER_TOOLS:
+            return None  # answering the peer (also "cannot do it") is always allowed
+        if peer_turn is not None:
+            if level.hold_for_owner and not peer_turn.get("approved"):
+                self.note("refused", f"{tool_name} (peer task not approved)", level, peer_turn.get("mail", ""))
+                return {"action": "block", "message": (
+                    f"Refused: at A2A trust level {level.number} '{level.name}' a peer's task runs only after "
+                    "Dmitry says «да» in this chat. Retell the task to him in two lines and ask «да» or «нет»; "
+                    "then end the turn.")}
+            return self._decide(level, tool_name, args, approved=True)
         if tool_name in ASK_TOOLS:
             # In an A2A session the question goes back to the calling agent, not to the owner, and nobody answers
             # it: the turn hung for the whole clarify timeout (m4, 2026-10-24). Owner approvals come from the trust
@@ -273,14 +287,18 @@ class TrustGate:
                 "Refused: an A2A session has no human to answer questions; the owner of this machine does not see "
                 "them. Do not ask. Run the task as given; a command that needs the owner's approval is sent to "
                 "the owner automatically by the trust level. If something is unclear, say so in your reply.")}
+        return self._decide(level, tool_name, args, approved=self._owner_said_yes())
+
+    def _decide(self, level: TrustLevel, tool_name: str, args: dict, approved: bool) -> Optional[dict]:
         command = str(args.get("command") or "") if tool_name == "terminal" else ""
-        if level.hold_for_owner and not self._owner_said_yes():
+        if level.hold_for_owner and not approved:
             self.note("refused", f"{tool_name} (task not approved)", level, _session_env("HERMES_SESSION_USER_ID"))
             return {"action": "block", "message": (
                 f"Refused: at A2A trust level {level.number} '{level.name}' a task runs only after the owner "
                 "approved it, and this one was not. Tell the peer the task needs the owner's approval.")}
         if level.approvals == "read_only":
-            if tool_name in READ_TOOLS or (tool_name == "terminal" and self._rules.is_read_command(command)):
+            if tool_name in READ_TOOLS or tool_name in ASK_TOOLS or \
+                    (tool_name == "terminal" and self._rules.is_read_command(command)):
                 return None
             what = f"{tool_name}: {command}" if command else tool_name
             self.note("refused", what, level, _session_env("HERMES_SESSION_USER_ID"))
