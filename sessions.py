@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import logging
 import sys
 import threading
@@ -138,6 +139,35 @@ def _tui_chats() -> list[dict]:
     return chats
 
 
+def registry_stats() -> dict:
+    """Why a chat is or is not listed: what each registry holds, and what the filters drop (#5 diagnosis)."""
+    stats: dict = {"pid": os.getpid(), "tui_modules": sorted(m for m in sys.modules if m.startswith("tui_gateway"))[:20]}
+    server = sys.modules.get("tui_gateway.server")
+    if server is not None:
+        with server._sessions_lock:
+            stats["tui_sessions"] = [{"id": sid, "key": str(s.get("session_key") or ""),
+                                      "finalized": bool(s.get("_finalized")), "closing": bool(s.get("_closing"))}
+                                     for sid, s in server._sessions.items() if isinstance(s, dict)][:30]
+    runner = _gateway_runner_now()
+    stats["gateway"] = runner is not None
+    if runner is None:
+        return stats
+    from gateway.session_authorities import all_authorities
+    rows = []
+    for authority in all_authorities(runner):
+        if authority is None:
+            continue
+        for sid, live in list(authority.sessions.items()):
+            source = getattr(live, "source", None)
+            rows.append({"profile": _profile_name(authority.profile_id), "id": sid,
+                         "platform": str(getattr(getattr(source, "platform", None), "value", "")),
+                         "subscribers": len(getattr(live, "subscribers", None) or ()),
+                         "superseded": bool(getattr(live, "superseded", False)),
+                         "retiring": bool(getattr(authority, "retiring", False))})
+    stats["authority_sessions"] = rows[:40]
+    return stats
+
+
 def _gateway_runner_now():
     from .restart import _gateway_runner
     return _gateway_runner()
@@ -260,11 +290,17 @@ class SessionServer:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 (http.server API)
-                if self.path.split("?", 1)[0] != "/sessions":
+                path, _, query = self.path.partition("?")
+                if path not in ("/sessions", "/sessions/debug"):
                     return self._send(404, {"error": "not found"})
                 caller = auth.caller(self.headers.get("Authorization", ""))
                 if caller is None:
                     return self._send(401, {"error": "fleet token required"})
+                if path == "/sessions/debug":
+                    try:
+                        return self._send(200, {"stats": registry_stats(), "sessions": local.cards()})
+                    except Exception as exc:
+                        return self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
                 self._send(200, {"sessions": local.cards()})
 
             def do_POST(self):  # noqa: N802 (http.server API)
