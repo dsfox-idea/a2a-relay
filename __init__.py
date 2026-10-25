@@ -17,7 +17,7 @@ from .chats import OwnerChats
 from .cli import build_parser, command as cli_command
 from .coder_tools import CodingTools
 from .feed import FeedRelay, owner_chat_alive
-from .hold import TaskHold, level_note
+from .hold import ForwardGuard, TaskHold, forwarded_context_id, is_approved_in, level_note
 from .identity import SECTION_ID, MachineIdentity
 from .jobs import JobBoard
 from .replies import ReplyInterpreter
@@ -52,6 +52,9 @@ def register(ctx) -> None:
     hold: TaskHold
 
     def owner_said_yes() -> bool:
+        forwarded = forwarded_context_id()
+        if forwarded:  # a /growser/-style route: approved by ForwardGuard into the target profile's dir
+            return is_approved_in(profile_home() / "a2a_relay", forwarded)
         from gateway.session_context import get_session_env
         return hold.is_approved(get_session_env("HERMES_SESSION_CHAT_ID", "") or "")
 
@@ -114,6 +117,7 @@ def register(ctx) -> None:
         return jobs.describe(str(args.get("job") or "").strip())
 
     restarter = GatewayRestart(paths.root / "restart_notice.json", inject)
+    _guard_profile_routes(ctx, hold, profile_home)
 
     def gateway_restart(args: dict, session_id: str = "", **_) -> str:
         return restarter.request(announce_to=chats.key_for_session(session_id), force=args.get("force") is True)
@@ -304,6 +308,26 @@ def _register_mail(ctx, chats: OwnerChats, inject, profile_home):
                           "text": text("The answer for the sender."),
                       }, ["id", "text"]))
     return mail
+
+
+def _guard_profile_routes(ctx, hold: TaskHold, profile_home) -> None:
+    """#13: only the default profile's copy wraps the forward. Its hold writes the approvals the owner's
+    chat shows, and the A2A server (with its /<profile>/ routes) belongs to the default profile."""
+    from pathlib import Path
+    from .restart import _gateway_runner
+    from .sessions import _profile_name
+    home = Path(getattr(ctx._manager, "home_path", None) or profile_home())
+    if _profile_name(str(home)) != "default":
+        return
+
+    def target_home(profile: str):
+        try:
+            from plugins.platforms.a2a.adapter import _profile_home
+            return _profile_home(profile)
+        except Exception:
+            return None
+
+    ForwardGuard(hold, target_home).install_when_gateway(_gateway_runner)
 
 
 def _sweep_forever(mail, every: float = 60.0) -> None:

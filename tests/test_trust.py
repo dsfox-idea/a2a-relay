@@ -435,5 +435,78 @@ class ShownClockTests(Env):
         self.assertEqual(self.asked, ["abcdef1234"], "marked once")
 
 
+class ForwardGuardTests(Env):
+    """#13: a task forwarded to another profile (/growser/) gets that profile's level."""
+
+    answer_when_asked = HoldTests.answer_when_asked
+
+    def setUp(self):
+        super().setUp()
+        self.hold = hold_mod.TaskHold(self.paths, self.gate, owner_present=lambda: True, timeout=lambda: 2,
+                                      limit=lambda: 2)
+        hold_mod._core_prefix = lambda peer: PREFIX
+        self.target = self.home / "profiles" / "growser"
+        self.target_policy = trust.TrustPolicy(lambda: self.target / "a2a_relay")
+        self.guard = hold_mod.ForwardGuard(self.hold, lambda name: str(self.target) if name == "growser" else None)
+        self.forwarded = []
+        self.adapter = SimpleNamespace(_forward_to_profile=self.fake_forward)
+        self.assertTrue(self.guard.install(self.adapter))
+
+    def fake_forward(self, agent, peer, context_id, framed_text, *, input_id=None):
+        self.forwarded.append((framed_text, input_id))
+        return "done", "TASK_STATE_COMPLETED"
+
+    def forward(self, text=PREFIX + "do X"):
+        return self.adapter._forward_to_profile({"slug": "growser", "profile": "growser"}, "m4", "ctx-9", text,
+                                                input_id="in-1")
+
+    def test_level_1_gets_the_neutral_header(self):
+        self.target_policy.set_level(trust.level_by_token("1"))
+        self.assertEqual(self.forward(), ("done", "TASK_STATE_COMPLETED"))
+        text, input_id = self.forwarded[0]
+        self.assertTrue(text.startswith("[A2A task from 'm4'"))
+        self.assertTrue(text.endswith("do X"))
+        self.assertEqual(input_id, "in-1")
+
+    def test_level_3_keeps_the_core_frame(self):
+        self.target_policy.set_level(trust.level_by_token("3"))
+        self.forward()
+        self.assertTrue(self.forwarded[0][0].startswith(PREFIX))
+
+    def test_the_target_level_counts_not_the_default(self):
+        self.set_level(4)  # default profile: hold; the target is at 1
+        self.target_policy.set_level(trust.level_by_token("1"))
+        self.assertEqual(self.forward()[0], "done")
+
+    def test_level_4_yes_forwards_and_marks_the_context_in_the_target(self):
+        self.target_policy.set_level(trust.level_by_token("4"))
+        self.answer_when_asked("once")
+        self.assertEqual(self.forward()[0], "done")
+        self.assertTrue(hold_mod.is_approved_in(self.target / "a2a_relay", "ctx-9"))
+        self.assertFalse(self.hold.is_approved("ctx-9"))
+        request = next(r for r in store.read_jsonl(self.paths.approvals) if r.get("type") == "request")
+        self.assertIn("[profile growser]", request["command"])
+
+    def test_level_4_no_rejects_without_forwarding(self):
+        self.target_policy.set_level(trust.level_by_token("4"))
+        self.answer_when_asked("deny", "not now")
+        reply, state = self.forward()
+        self.assertEqual(state, "TASK_STATE_REJECTED")
+        self.assertIn("not now", reply)
+        self.assertEqual(self.forwarded, [])
+
+    def test_unknown_profile_passes_untouched(self):
+        result = self.adapter._forward_to_profile({"slug": "x"}, "m4", "ctx", PREFIX + "y", input_id=None)
+        self.assertEqual(result[0], "done")
+        self.assertEqual(self.forwarded[0][0], PREFIX + "y")
+
+    def test_installs_once(self):
+        self.assertFalse(self.guard.install(self.adapter))
+
+    def test_the_wrapped_hermes_method_still_matches(self):
+        ok, why = hold_mod.forward_seam_ok()
+        self.assertTrue(ok, why)
+
+
 if __name__ == "__main__":
     unittest.main()

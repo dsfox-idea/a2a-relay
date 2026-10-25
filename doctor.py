@@ -176,8 +176,18 @@ class Doctor:
         if probe_peers:
             checks.extend(self.peers())
         if self.is_default_profile:
+            checks.append(self.profile_route_levels())
             checks.extend(self.profiles())
         return checks
+
+    @staticmethod
+    def profile_route_levels() -> Check:
+        """#13: trust levels reach /<profile>/ routes only through a wrapped Hermes method."""
+        from .hold import forward_seam_ok
+        ok, why = forward_seam_ok()
+        return Check("trust levels on profile routes", OK if ok else WARN,
+                     "" if ok else f"{why}; tasks to /<profile>/ routes keep the core framing and level 4 "
+                                   "blocks every tool there. Update a2a-relay.")
 
     def profile_route(self) -> Check:
         """Inbound server settings (port, tokens, trusted peers, reply timeout) belong to the default
