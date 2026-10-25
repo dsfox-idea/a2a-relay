@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+os.environ["A2A_RELAY_LANGUAGE"] = "ru"
 import json
 import os
 import tempfile

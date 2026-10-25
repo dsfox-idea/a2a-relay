@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
+os.environ["A2A_RELAY_LANGUAGE"] = "ru"
+import os
 import sys
 import tempfile
 import threading

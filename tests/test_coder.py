@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+os.environ["A2A_RELAY_LANGUAGE"] = "ru"
+import os
 import subprocess
 import tempfile
 import threading

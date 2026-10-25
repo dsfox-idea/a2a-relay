@@ -1,4 +1,4 @@
-"""Plain "да"/"нет" answers to A2A approval prompts.
+"""Plain yes/no answers to A2A approval prompts.
 
 The decision is made here, in code, from the user's own message text — never by the model — so a
 peer's text cannot talk the agent into approving. A bare yes/no counts while an approval prompt shown
@@ -14,13 +14,12 @@ import threading
 from typing import Optional
 
 from .approvals import ALLOW, DENY, DecisionDesk
+from .i18n import ALL_NO, ALL_YES, is_relay_text
 
 logger = logging.getLogger("a2a_relay")
 
-_RELAY_HEADER = "[a2a-relay:"
-_YES = re.compile(r"^\s*(да|ага|разрешаю|разреши|можно|давай|ок|ok|yes|y)\s*[.!)]*\s*$", re.IGNORECASE)
-_NO = re.compile(r"^\s*(нет|не надо|не разрешаю|отклоняю|отклони|запрещаю|no|n)\b[\s,.:;!—-]*(.*)$",
-                 re.IGNORECASE | re.DOTALL)
+_YES = re.compile(r"^\s*(" + "|".join(map(re.escape, ALL_YES)) + r")\s*[.!)]*\s*$", re.IGNORECASE)
+_NO = re.compile(r"^\s*(" + "|".join(map(re.escape, ALL_NO)) + r")\b[\s,.:;!—-]*(.*)$", re.IGNORECASE | re.DOTALL)
 
 
 def parse_answer(text: str) -> Optional[tuple[str, str]]:
@@ -48,12 +47,12 @@ class ReplyInterpreter:
 
     def on_user_message(self, text: str) -> Optional[str]:
         """Context for the model when the message was handled as a decision (or was ambiguous)."""
-        if not isinstance(text, str) or text.lstrip().startswith(_RELAY_HEADER):
+        if not isinstance(text, str) or is_relay_text(text):
             return None  # relay's own injected turn
         answer = parse_answer(text)
         if answer is None:
-            # Other text keeps the window open until the request is answered or expires: a typo before the "да"
-            # cost the owner a request on m5 (2026-10-24, "дв" then "да"). Requests no longer pending drop out.
+            # Other text keeps the window open until the request is answered or expires: a typo before the yes
+            # cost the owner a request on m5 (2026-10-24, a typo, then yes). Requests no longer pending drop out.
             with self._lock:
                 if self._asked:
                     live = {r["request_id"] for r in self._desk.pending()}
@@ -65,17 +64,17 @@ class ReplyInterpreter:
             return None
         pending = [r for r in self._desk.pending() if r["request_id"] in asked]
         if not pending:
-            return "[a2a-relay] Ответ Дмитрия не применён: запрос уже закрыт или истёк. Скажи ему об этом."
+            return "[a2a-relay] The owner's answer was not applied: the request is closed or expired. Tell the owner."
         if len(pending) > 1:
             with self._lock:
                 self._asked.update(asked)
             ids = ", ".join(r["request_id"][:8] for r in pending)
-            return (f"[a2a-relay] Ответ не применён: ждут решения несколько запросов ({ids}). "
-                    "Попроси Дмитрия ответить командой /a2a-allow <id> или /a2a-deny <id>.")
+            return (f"[a2a-relay] The answer was not applied: several requests wait ({ids}). Ask the owner to "
+                    "answer with /a2a-allow <id> or /a2a-deny <id>.")
         choice, reason = answer
         request = pending[0]
         result = self._desk.decide(f"{request['request_id']} {reason}".strip(), choice)
         logger.info("a2a-relay: plain reply applied as %s to %s", choice, request["request_id"][:8])
-        return (f"[a2a-relay] Сообщение Дмитрия применено кодом плагина как решение по A2A-запросу "
-                f"{request['request_id'][:8]} ({request.get('command', '')[:120]}). Итог: {result} "
-                "Коротко подтверди Дмитрию, инструменты не вызывай.")
+        return (f"[a2a-relay] Plugin code applied the owner's message as the decision on A2A request "
+                f"{request['request_id'][:8]} ({request.get('command', '')[:120]}). Result: {result} "
+                "Confirm it to the owner briefly; call no tools.")

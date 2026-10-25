@@ -27,17 +27,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .i18n import t
+
 logger = logging.getLogger("a2a_relay")
 
 _ANNOUNCE_TRIES = 60
 _ANNOUNCE_EVERY = 5.0
 _MARKER_MAX_AGE = 3600.0
 _SETTLE_SECONDS = 180.0  # the announcing gateway must live this long before its notice counts as delivered
-_LOST_TEXT = ("\nПредыдущее такое уведомление ушло в gateway PID {lost}, но его тоже перезапустили, так что "
-              "ход по нему мог прерваться.")
-_BACK_TEXT = ("[a2a-relay: gateway перезапущен по запросу из этого чата (было PID {old}, теперь {new}, "
-              "через {took} с)]\nПроверь всё, чего ты ждал: свои фоновые процессы, пиров, незаконченные шаги. "
-              "Это служебное сообщение плагина, а не сообщение владельца.")
 
 
 def _pid_alive(pid: int) -> bool:
@@ -264,11 +261,11 @@ class GatewayRestart:
         data = self.pending_announcement()
         if data is None:
             return False
-        text = _BACK_TEXT.format(old=data.get("pid"), new=os.getpid(),
-                                 took=int(self._clock() - float(data.get("ts") or 0)))
+        text = t("restart.back", old=data.get("pid"), new=os.getpid(),
+                 took=int(self._clock() - float(data.get("ts") or 0)))
         lost = data.get("announced_by")
         if lost is not None:
-            text += _LOST_TEXT.format(lost=lost)
+            text += t("restart.lost", lost=lost)
         for attempt in range(_ANNOUNCE_TRIES):
             try:
                 if self._inject(str(data["session_key"]), text):

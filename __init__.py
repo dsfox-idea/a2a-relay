@@ -291,7 +291,7 @@ def _register_mail(ctx, chats: OwnerChats, inject, profile_home):
         return mail.reply(key, str(args.get("id") or ""), str(args.get("text") or ""))
 
     send_doc = ("Hand a task to an OPEN owner chat on any fleet machine (find it with sessions_list): it runs there "
-                "in a chat Dmitry sees, in that project's context, and its agent answers with session_reply; the "
+                "in a chat the owner sees, in that project's context, and its agent answers with session_reply; the "
                 "answer arrives in THIS chat as a separate message. Returns at once; do not wait. Prefer it to "
                 "a2a_send when a chat already works on the project. A busy chat starts it after its current turn.")
     ctx.register_tool(name="session_send", toolset="a2a-relay", handler=session_send, description=send_doc,

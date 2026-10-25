@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+os.environ["A2A_RELAY_LANGUAGE"] = "ru"
 import json
 import os
 import sys
@@ -416,7 +418,7 @@ class ApprovalIntegrationTests(unittest.TestCase):
         context = interp.on_user_message("Да!")
         out["_thread"].join(5)
         self.assertEqual(out.get("choice"), "once")
-        self.assertIn("применено кодом плагина", context)
+        self.assertIn("Plugin code applied", context)
 
     def test_plain_no_with_reason_denies(self):
         interp = self._interpreter()
@@ -439,7 +441,7 @@ class ApprovalIntegrationTests(unittest.TestCase):
         context = interp.on_user_message("да")
         out["_thread"].join(5)
         self.assertEqual(out.get("choice"), "once")
-        self.assertIn("применено кодом плагина", context)
+        self.assertIn("Plugin code applied", context)
         self.assertIsNone(interp.on_user_message("да"), "the window closes once answered")
 
     def test_expired_request_leaves_the_window_silently(self):

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+os.environ["A2A_RELAY_LANGUAGE"] = "ru"
 import importlib.util
 import json
 import sys
@@ -400,7 +402,7 @@ class ShownClockTests(Env):
 
     def show(self):
         rid = self.request_id()
-        text = feed_mod._HEADER + f"⚠ m5 просит выполнить задачу на win, id {rid[:8]}, ..."
+        text = "[a2a-relay: автоматическое уведомление]\n" + f"⚠ m5 просит выполнить задачу на win, id {rid[:8]}, ..."
         self.feed._queued_prompts.append(rid)
         self.feed.note_turn(text)
 
@@ -428,10 +430,10 @@ class ShownClockTests(Env):
         self.feed._queued_prompts.append("abcdef1234")
         self.feed.note_turn("id abcdef12 typed by someone")
         self.assertEqual(self.asked, [])
-        self.feed.note_turn(feed_mod._HEADER + "⚠ ... id abcdef12 ...")
+        self.feed.note_turn("[a2a-relay: автоматическое уведомление]\n" + "⚠ ... id abcdef12 ...")
         self.assertEqual(self.asked, ["abcdef1234"])
         self.assertTrue(self.paths.shown_file("abcdef1234").exists())
-        self.feed.note_turn(feed_mod._HEADER + "⚠ ... id abcdef12 ...")
+        self.feed.note_turn("[a2a-relay: автоматическое уведомление]\n" + "⚠ ... id abcdef12 ...")
         self.assertEqual(self.asked, ["abcdef1234"], "marked once")
 
 

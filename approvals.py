@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Callable, Optional
 
+from .i18n import t
 from .store import RelayPaths, append_jsonl, read_jsonl, write_json_atomic
 
 logger = logging.getLogger("a2a_relay")
@@ -166,35 +167,33 @@ class DecisionDesk:
         pending = self.pending()
         if not parts:
             if len(pending) != 1:
-                return self.describe_pending() + "\nУкажи id: /a2a-allow <id> или /a2a-deny <id> [причина]."
+                return self.describe_pending() + t("desk.give_id")
             target = pending[0]
             reason = ""
         else:
             matches = [r for r in pending if r["request_id"].startswith(parts[0].lower())]
             if len(matches) != 1:
-                return (f"Запрос «{parts[0]}» не найден среди ожидающих." if not matches
-                        else f"Под «{parts[0]}» подходит несколько запросов, укажи id длиннее.")
+                return t("desk.not_found" if not matches else "desk.ambiguous", id=parts[0])
             target = matches[0]
             reason = parts[1] if len(parts) > 1 else ""
         request_id = target["request_id"]
         write_json_atomic(self._paths.decision_file(request_id), {
             "request_id": request_id, "choice": choice, "reason": reason, "ts": self._clock(), "by": "slash"})
         logger.info("a2a-relay: user chose %s for %s", choice, request_id[:8])
-        verb = "Разрешено" if choice == ALLOW else "Отклонено"
+        verb = t("desk.allowed" if choice == ALLOW else "desk.denied")
         if self._wait_resolved(request_id, wait_seconds):
-            return f"{verb}: {request_id[:8]} ({target.get('command', '')[:80]}). Шлюз применил решение."
-        return (f"{verb}: {request_id[:8]}. Решение записано, но шлюз пока не подтвердил его. "
-                "Если запрос уже истёк, решение не применится.")
+            return t("desk.applied", verb=verb, id=request_id[:8], command=target.get("command", "")[:80])
+        return t("desk.unconfirmed", verb=verb, id=request_id[:8])
 
     def describe_pending(self) -> str:
         pending = self.pending()
         if not pending:
-            return "Нет A2A-запросов, ждущих решения."
-        lines = ["A2A-запросы, ждущие решения:"]
+            return t("desk.none")
+        lines = [t("desk.list")]
         for r in pending:
             left = int(float(r["expires_at"]) - self._clock())
-            lines.append(f"- {r['request_id'][:8]} от {r.get('peer') or '?'}, осталось {left} с: "
-                         f"{r.get('command', '')[:120]}")
+            lines.append(t("desk.item", id=r["request_id"][:8], peer=r.get("peer") or "?", left=left,
+                           command=r.get("command", "")[:120]))
         return "\n".join(lines)
 
     def _wait_resolved(self, request_id: str, wait_seconds: float) -> bool:

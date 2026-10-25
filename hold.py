@@ -2,9 +2,9 @@
 
 * Framing: at levels with ``neutral_framing`` the core "untrusted external input" frame is replaced by
   a neutral header that still keeps the peer's text from starting with ``/``.
-* Hold: at levels with ``hold_for_owner`` the task waits for the owner's "да" in the owner's chat, using
+* Hold: at levels with ``hold_for_owner`` the task waits for the owner's yes in the owner's chat, using
   the same ``approvals.jsonl`` / decision-file channel as command approvals. A refusal (no owner chat,
-  "нет", timeout) is returned to the peer as a rejected A2A task.
+  "no", timeout) is returned to the peer as a rejected A2A task.
 
 Only the direct A2A path passes this hook. A task forwarded to another profile (``/growser/``) goes
 through the A2A adapter's ``_forward_to_profile`` with no plugin hook on the way; :class:`ForwardGuard`

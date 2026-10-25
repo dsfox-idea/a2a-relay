@@ -8,6 +8,7 @@ import subprocess
 import time
 
 from .doctor import Doctor, HostFacts, format_report
+from .i18n import ALL_YES
 
 
 def build_parser(parser: argparse.ArgumentParser) -> None:
@@ -174,7 +175,7 @@ class Setup:
         for check in todo:
             for fix in check.fixes:
                 print(f"  hermes {' '.join(fix)}    # {check.name}")
-        if not self._assume_yes and input("\nApply? [y/N] ").strip().lower() not in ("y", "yes", "да", "д"):
+        if not self._assume_yes and input("\nApply? [y/N] ").strip().lower() not in ("y", "yes") + ALL_YES:
             print("Nothing changed.")
             return 1
         backup = self._backup_config()

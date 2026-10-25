@@ -1,4 +1,6 @@
 import sys
+import os
+os.environ["A2A_RELAY_LANGUAGE"] = "ru"
 import tempfile
 import unittest
 from pathlib import Path
@@ -102,7 +104,7 @@ class SendReplyTests(unittest.TestCase):
         self.assertIn("Delivered to m4", result)
         key, task = self.fleet.injected["m4"][-1]
         self.assertEqual(key, self.fleet.m4_chat)
-        self.assertTrue(task.startswith(mail_mod.TASK_TAG + "win"))
+        self.assertTrue(task.startswith("[a2a-relay: задача от win"))
         mail_id = mail_mod._TASK_ID.search(task).group(1)
         self.assertIn(f'session_reply(id="{mail_id}"', task)
         self.assertIn("delivered to win", self.m4.reply(self.fleet.m4_chat, mail_id, "done: 3 files"))
@@ -177,20 +179,20 @@ class TurnTests(unittest.TestCase):
         self.assertIsNone(self.m4.on_turn("sid-m", self.fleet.m4_chat, self.task))
         self.assertFalse(self.m4.turns.get("sid-m")["approved"])
         context = self.m4.on_turn("sid-m", self.fleet.m4_chat, "да")
-        self.assertIn("разрешил", context)
+        self.assertIn("owner allowed", context)
         self.assertTrue(self.m4.turns.get("sid-m")["approved"])
 
     def test_level_4_no_sends_a_refusal(self):
         self.m4.on_turn("sid-m", self.fleet.m4_chat, self.task)
         context = self.m4.on_turn("sid-m", self.fleet.m4_chat, "нет, не сейчас")
-        self.assertIn("отклонил", context)
+        self.assertIn("owner declined", context)
         self.assertIsNone(self.m4.turns.get("sid-m"))
         self.assertIn("Declined by the owner", self.fleet.injected["win"][-1][1])
 
     def test_a_relay_notice_before_the_answer_keeps_the_hold(self):
         self.m4.on_turn("sid-m", self.fleet.m4_chat, self.task)
         self.assertIsNone(self.m4.on_turn("sid-m", self.fleet.m4_chat, "[a2a-relay: автоматическое уведомление]"))
-        self.assertIn("разрешил", self.m4.on_turn("sid-m", self.fleet.m4_chat, "да"))
+        self.assertIn("owner allowed", self.m4.on_turn("sid-m", self.fleet.m4_chat, "да"))
 
     def test_other_owner_text_ends_the_peer_turn(self):
         self.m4.on_turn("sid-m", self.fleet.m4_chat, self.task)
@@ -224,7 +226,7 @@ class GateTests(unittest.TestCase):
     def test_peer_turn_at_level_4_blocks_until_approved(self):
         gate = self.gate(4)
         blocked = gate.on_pre_tool_call("read_file", {}, peer_turn={"mail": "m", "approved": False})
-        self.assertIn("«да»", blocked["message"])
+        self.assertIn("says yes", blocked["message"])
         self.assertIsNone(gate.on_pre_tool_call("session_reply", {}, peer_turn={"mail": "m", "approved": False}))
         self.assertIsNone(gate.on_pre_tool_call("read_file", {}, peer_turn={"mail": "m", "approved": True}))
 
