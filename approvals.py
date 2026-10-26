@@ -73,7 +73,8 @@ class ApprovalBridge:
                  clock: Callable[[], float] = time.time,
                  auto_decide: Optional[Callable[[str, list, str], Optional[str]]] = None,
                  task_for_key: Optional[Callable[[str], str]] = None,
-                 on_owner_allowed: Callable[[str], None] = lambda task: None):
+                 on_owner_allowed: Callable[[str], None] = lambda task: None,
+                 owner_consent: Callable[[str, str], bool] = lambda session_key, command: False):
         self._paths = paths
         self._queue = queue or GatewayQueue()
         self._clock = clock
@@ -82,6 +83,7 @@ class ApprovalBridge:
         # (``mail:<id>``); "" for the owner's own work, which the relay never touches.
         self._task_for_key = task_for_key or (lambda key: key if A2A_SESSION_MARKER in key else "")
         self._on_owner_allowed = on_owner_allowed
+        self._owner_consent = owner_consent
         self._lock = threading.Lock()
         self._tracked: dict[str, tuple[str, str]] = {}  # request_id -> (session_key, task), left to the owner
 
@@ -92,6 +94,12 @@ class ApprovalBridge:
             return
         task = self._task_for_key(session_key or "")
         if not task:
+            if self._owner_consent(session_key or "", command or ""):
+                with self._lock:
+                    request_id = self._queue.find_request_id(session_key, command, set(self._tracked))
+                    if request_id:
+                        self._queue.resolve(session_key, ALLOW, request_id, None)
+                        logger.info("a2a-relay: owner's chat yes settled approval %s", request_id[:8])
             return
         auto = self._auto_decide(command, list(pattern_keys or []), task)
         with self._lock:

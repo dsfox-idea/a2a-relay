@@ -122,6 +122,9 @@ Fewer prompts for the same safety:
   `session_send(..., preapprove=true)`: the target runs it without asking you again. The plugin accepts
   this only when your latest message in the sending chat is a plain yes.
 - **Longer wait.** Prompts of a peer's task wait 15 min instead of `approvals.timeout`.
+- **Your yes in the chat counts.** When the agent shows a command in its message (a line, a code block
+  or a `span`) and you answer a plain yes, Hermes' own prompt for exactly that command in the same turn
+  is settled for you, once. A part of the shown command, another command or any other reply stays asked.
 
 The level applies the same way to a peer's A2A session, to a task sent to a profile route
 (`http://host:9900/<profile>/`), and to a `session_send` task running in one of your chats; there

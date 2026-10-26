@@ -12,6 +12,7 @@ import threading
 
 from .approvals import ALLOW, DENY, ApprovalBridge, DecisionDesk, A2A_SESSION_MARKER
 from .chats import OwnerChats
+from .consent import ChatConsent
 from .cli import build_parser, command as cli_command
 from .coder_tools import CodingTools
 from .feed import FeedRelay, ServiceChat, owner_chat_alive
@@ -69,8 +70,9 @@ def register(ctx) -> None:
         mail_id = mail.turns.mail_for_key(session_key)
         return f"mail:{mail_id}" if mail_id else ""
 
+    consent = ChatConsent()
     bridge = ApprovalBridge(paths, auto_decide=gate.auto_decision, task_for_key=task_for_key,
-                            on_owner_allowed=grants.grant)
+                            on_owner_allowed=grants.grant, owner_consent=consent.take)
     desk = DecisionDesk(paths)
     replies = ReplyInterpreter(desk)
     feed = FeedRelay(paths, inject=inject, can_inject=chats.can_inject, on_asked=replies.note_asked,
@@ -80,7 +82,8 @@ def register(ctx) -> None:
                           owner_said_yes=lambda sid: (parse_answer(last_owner_text.get(sid, "")) or ("",))[0] == ALLOW)
     _longer_peer_approvals(lambda: current_session_is_a2a() or bool(task_for_key(_current_session_key())))
 
-    def on_pre_llm_call(user_message=None, platform: str = "", session_id: str = "", **_):
+    def on_pre_llm_call(user_message=None, platform: str = "", session_id: str = "", conversation_history=None,
+                        **_):
         if platform == "a2a" or current_session_is_a2a():
             level = gate.level()
             return None if level.neutral_framing else {"context": level_note(level)}
@@ -91,6 +94,7 @@ def register(ctx) -> None:
         text = user_message if isinstance(user_message, str) else ""
         if not is_relay_text(text):
             last_owner_text[session_id] = text  # session_send(preapprove=true) needs the owner's own latest yes
+            consent.on_turn(key, text, conversation_history)
         in_service_chat = key == feed.session_key
         if in_service_chat:
             feed.note_turn(text)  # the relay's own turn: its prompts are on screen now
