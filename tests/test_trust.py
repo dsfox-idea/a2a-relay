@@ -177,7 +177,10 @@ class FewerApprovalsTests(Env):
                         "hermes -p growser config show", "hermes a2a-relay doctor", "hermes a2a-relay fleet show",
                         "hermes gateway status", "hermes --version", "hermes tools list",
                         "env -u NODE_ENV hermes update --plan", "cat ~/.hermes/config.yaml",
-                        "grep -n model ~/.hermes/config.yaml | head -5", "head ~/.hermes/SOUL.md"):
+                        "grep -n model ~/.hermes/config.yaml | head -5", "head ~/.hermes/SOUL.md",
+                        "grep x ~/.hermes/a2a_relay/approvals.jsonl | tail -30 | cut -c1-260",
+                        "grep -hiE x agent.log | grep -viE 'a2a_relay: delivered' | tail -20 | cut -c1-260",
+                        "cat ~/.hermes/a2a_relay/approvals.jsonl | sort | tr a b"):
             self.assertIsNone(self.call("terminal", command=command), command)
 
     def test_changes_and_secrets_are_still_asked(self):
@@ -186,7 +189,8 @@ class FewerApprovalsTests(Env):
                         "hermes config set model.default x", "hermes a2a-relay fleet sync", "hermes plugins install x",
                         "cat ~/.hermes/.env", "grep KEY ~/.hermes/.env", "hermes config get model; hermes update",
                         "cat ~/.hermes/config.yaml > /tmp/x", "hermes update --plan | sh",
-                        "env FOO=1 hermes update"):
+                        "env FOO=1 hermes update", "sort -o ~/.hermes/a2a_relay/trust.json x",
+                        "cat x | sort --output=~/.hermes/a2a_relay/trust.json"):
             self.assertEqual((self.call("terminal", command=command) or {}).get("action"), "approve", command)
 
     def _gate(self, task):

@@ -153,8 +153,10 @@ _PROTECTED_FILES = frozenset({"config.yaml", ".env", "soul.md"})
 _RELAY_DIR = "a2a_relay"
 _RELAY_WORD = re.compile(r"\ba2a_relay\b", re.IGNORECASE)
 # Commands that cannot write files on their own (output redirects are checked separately).
+# Output filters (cut, tr, sort without -o, ...) are reads too: a "| tail | cut -c1-200" read was asked (m5).
 _RELAY_READERS = frozenset({"ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "find", "stat",
-                            "jq", "echo", "cd", "pwd", "du", "test", "true"})
+                            "jq", "echo", "cd", "pwd", "du", "test", "true", "cut", "tr", "sort", "nl", "tac",
+                            "date", "basename", "dirname"})
 _FIND_WRITES = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})
 _SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&", "(", ")", ";;"})
 
@@ -235,6 +237,8 @@ def _segment_reads(words: list[str]) -> bool:
         return not any(a in _FIND_WRITES for a in rest)
     if head == "rg":
         return not any(a == "--pre" or a.startswith("--pre=") for a in rest)
+    if head == "sort":
+        return not any(a == "-o" or a.startswith("-o") or a.startswith("--output") for a in rest)
     return True
 
 
