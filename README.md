@@ -108,8 +108,20 @@ How much a peer's task may do in this profile without you. Each profile has its 
 
 System changes: global package installs (`pip install` outside a venv, `npm -g`, `brew`, `winget`,
 `apt`, `cargo install`, ...), `hermes update/plugins/config/tools/setup`, and writes to `config.yaml`,
-`.env`, `SOUL.md` or the plugin's own `a2a_relay/` folder (reading that folder is fine). Hermes' own
-floors (hardline blocks, `approvals.deny`) apply at every level.
+`.env`, `SOUL.md` or the plugin's own `a2a_relay/` folder. Reads are never asked: `cat`/`grep` of
+`config.yaml`, `SOUL.md` or `a2a_relay/`, and read-only Hermes commands (`hermes update --check/--plan`,
+`hermes config get/show`, `hermes gateway status`, `hermes a2a-relay doctor`, ...); `.env` stays asked
+because it holds secrets. Hermes' own floors (hardline blocks, `approvals.deny`) apply at every level.
+
+Fewer prompts for the same safety:
+- **One yes per task.** After your yes to one system change of a peer's task, its further system changes
+  run without asking (for 4 h). A "no" or a timeout grants nothing.
+- **Same rules in your chats.** A `session_send` task in one of your chats gets the same automatic
+  decisions as in a hidden A2A session; your own work in that chat is never decided by the plugin.
+- **Your yes travels.** Approve a task in the chat that sends it, then the agent sends it with
+  `session_send(..., preapprove=true)`: the target runs it without asking you again. The plugin accepts
+  this only when your latest message in the sending chat is a plain yes.
+- **Longer wait.** Prompts of a peer's task wait 15 min instead of `approvals.timeout`.
 
 The level applies the same way to a peer's A2A session, to a task sent to a profile route
 (`http://host:9900/<profile>/`), and to a `session_send` task running in one of your chats; there

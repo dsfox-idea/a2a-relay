@@ -163,6 +163,45 @@ class SendReplyTests(unittest.TestCase):
         self.assertEqual(status, 400)
 
 
+class PreapproveTests(unittest.TestCase):
+    """Owner decision 2026-10-26: his yes in the sender's chat travels with the task."""
+
+    def setUp(self):
+        self.fleet = Fleet(level=4)
+        self.win, self.m4 = self.fleet.box["win"], self.fleet.box["m4"]
+        self.grants = trust.TaskGrants(store={})
+        self.m4._grants = self.grants
+
+    def tearDown(self):
+        self.fleet.close()
+
+    def send(self, owner_said_yes):
+        return self.win.send(self.fleet.win_chat, "sid-w", "default", "m1", "update hermes", preapproved=True,
+                             owner_said_yes=owner_said_yes)
+
+    def test_needs_the_owners_yes_in_the_sender_chat(self):
+        self.assertIn("needs the owner's plain yes", self.send(False))
+        self.assertEqual(self.fleet.injected["m4"], [])
+
+    def test_a_preapproved_task_skips_the_hold_and_the_asks(self):
+        self.assertIn("Delivered to m4", self.send(True))
+        key, task = self.fleet.injected["m4"][-1]
+        self.assertIn("уже одобрил", task)
+        self.assertNotIn("заблокированы до его «да»", task)
+        self.m4.on_turn("sid-m", key, task)
+        self.assertTrue(self.m4.turns.get("sid-m")["approved"])
+        mail_id = mail_mod._TASK_ID.search(task).group(1)
+        self.assertTrue(self.grants.has(f"mail:{mail_id}"))
+        self.assertEqual(self.m4.turns.mail_for_key(key), mail_id)
+
+    def test_a_plain_task_at_level4_still_holds(self):
+        self.win.send(self.fleet.win_chat, "sid-w", "default", "m1", "x")
+        key, task = self.fleet.injected["m4"][-1]
+        self.m4.on_turn("sid-m", key, task)
+        self.assertFalse(self.m4.turns.get("sid-m")["approved"])
+        self.assertFalse(any(self.grants.has(f"mail:{r['id']}") for r in self.m4._store.all("in")))
+
+
 class ProjectRuleTests(unittest.TestCase):
     """#17: a project chat takes tasks only from its own project; machine tasks go to the hermes-... chat."""
 

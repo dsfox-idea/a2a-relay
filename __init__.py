@@ -10,18 +10,19 @@ from __future__ import annotations
 import logging
 import threading
 
-from .approvals import ALLOW, DENY, ApprovalBridge, DecisionDesk
+from .approvals import ALLOW, DENY, ApprovalBridge, DecisionDesk, A2A_SESSION_MARKER
 from .chats import OwnerChats
 from .cli import build_parser, command as cli_command
 from .coder_tools import CodingTools
 from .feed import FeedRelay, ServiceChat, owner_chat_alive
 from .hold import ForwardGuard, TaskHold, forwarded_context_id, is_approved_in, level_note
 from .identity import SECTION_ID, MachineIdentity
+from .i18n import is_relay_text
 from .jobs import JobBoard
-from .replies import ReplyInterpreter
+from .replies import ReplyInterpreter, parse_answer
 from .restart import GatewayRestart
 from .store import RelayPaths
-from .trust import CommandRules, TrustCommand, TrustGate, TrustPolicy, current_session_is_a2a
+from .trust import CommandRules, TaskGrants, TrustCommand, TrustGate, TrustPolicy, current_session_is_a2a
 
 logger = logging.getLogger("a2a_relay")
 
@@ -56,17 +57,28 @@ def register(ctx) -> None:
         from gateway.session_context import get_session_env
         return hold.is_approved(get_session_env("HERMES_SESSION_CHAT_ID", "") or "")
 
+    grants = TaskGrants()
     gate = TrustGate(policy, CommandRules(profile_home), paths.trust_journal,
-                     owner_said_yes=owner_said_yes)
+                     owner_said_yes=owner_said_yes, grants=grants)
     hold = TaskHold(paths, gate, owner_present=lambda: owner_chat_alive(paths))
     trust_command = TrustCommand(policy, paths.trust_journal)
-    bridge = ApprovalBridge(paths, auto_decide=lambda command, keys: (
-        gate.auto_decision(command, keys) if current_session_is_a2a() else None))
+    def task_for_key(session_key: str) -> str:
+        """The peer task an approval prompt belongs to: an A2A session, or a peer's task in an owner chat."""
+        if A2A_SESSION_MARKER in session_key:
+            return session_key
+        mail_id = mail.turns.mail_for_key(session_key)
+        return f"mail:{mail_id}" if mail_id else ""
+
+    bridge = ApprovalBridge(paths, auto_decide=gate.auto_decision, task_for_key=task_for_key,
+                            on_owner_allowed=grants.grant)
     desk = DecisionDesk(paths)
     replies = ReplyInterpreter(desk)
     feed = FeedRelay(paths, inject=inject, can_inject=chats.can_inject, on_asked=replies.note_asked,
                      target=_service_chat(ctx, profile_home).key)
-    mail = _register_mail(ctx, chats, inject, profile_home)
+    last_owner_text: dict[str, str] = {}
+    mail = _register_mail(ctx, chats, inject, profile_home, grants,
+                          owner_said_yes=lambda sid: (parse_answer(last_owner_text.get(sid, "")) or ("",))[0] == ALLOW)
+    _longer_peer_approvals(lambda: current_session_is_a2a() or bool(task_for_key(_current_session_key())))
 
     def on_pre_llm_call(user_message=None, platform: str = "", session_id: str = "", **_):
         if platform == "a2a" or current_session_is_a2a():
@@ -77,6 +89,8 @@ def register(ctx) -> None:
             return None
         chats.remember(session_id, key)
         text = user_message if isinstance(user_message, str) else ""
+        if not is_relay_text(text):
+            last_owner_text[session_id] = text  # session_send(preapprove=true) needs the owner's own latest yes
         in_service_chat = key == feed.session_key
         if in_service_chat:
             feed.note_turn(text)  # the relay's own turn: its prompts are on screen now
@@ -187,7 +201,7 @@ def _register_tools(ctx, a2a_send, a2a_task, gateway_restart) -> None:
                       emoji="\u267b", schema=schema("gateway_restart", restart_doc, {"force": force}, []))
 
 
-def _register_mail(ctx, chats: OwnerChats, inject, profile_home):
+def _register_mail(ctx, chats: OwnerChats, inject, profile_home, grants=None, owner_said_yes=lambda sid: False):
     """#5 and #6: sessions_list, session_send, session_reply. Returns the process-wide SessionMail."""
     from pathlib import Path
     from .cli import build_fleet
@@ -239,7 +253,8 @@ def _register_mail(ctx, chats: OwnerChats, inject, profile_home):
                 return level() if level else TrustPolicy(lambda: home / "a2a_relay").level()
 
             guard.mail = SessionMail(MailStore(get_default_hermes_root() / "a2a_relay" / "mail"), directory, auth,
-                                     members, guard.injectors.get, level_for, PeerTurns(guard.turns))
+                                     members, guard.injectors.get, level_for, PeerTurns(guard.turns),
+                                     grants=grants)
             threading.Thread(target=_sweep_forever, args=(guard.mail,), daemon=True, name="a2a-relay-mail").start()
     mail = guard.mail
     SessionServer(local, auth, lambda: _process_guard().mail).start_when_gateway(_gateway_runner, address)
@@ -269,7 +284,8 @@ def _register_mail(ctx, chats: OwnerChats, inject, profile_home):
     def session_send(args: dict, session_id: str = "", **_) -> str:
         return mail.send(chats.key_for_session(session_id), session_id, _profile_name(str(profile_home())),
                          str(args.get("session") or ""), str(args.get("text") or ""),
-                         machine=str(args.get("machine") or ""), project=str(args.get("project") or ""))
+                         machine=str(args.get("machine") or ""), project=str(args.get("project") or ""),
+                         preapproved=args.get("preapprove") is True, owner_said_yes=owner_said_yes(session_id))
 
     def session_reply(args: dict, session_id: str = "", **_) -> str:
         key = chats.key_for_session(session_id)
@@ -290,6 +306,10 @@ def _register_mail(ctx, chats: OwnerChats, inject, profile_home):
                           "session": text("Or the target chat's session id from sessions_list (or a unique tail)."),
                           "text": text("The task, self-contained: the other chat knows nothing of this one."),
                           "machine": text("Optional: that chat's machine (A2A node name), to disambiguate."),
+                          "preapprove": {"type": "boolean", "description": (
+                              "true: the owner already said yes to this exact task here, so the target runs it "
+                              "(system changes included) without asking him again. Only right after his plain yes "
+                              "to the task text you showed him; the plugin checks that his latest message is yes.")},
                       }, ["text"]))
     reply_doc = ("Answer a task another chat sent here with session_send (its message names the id): one message "
                  "with the result, or why it cannot be done. Only the chat that received the task can answer it.")
@@ -319,6 +339,41 @@ def _guard_profile_routes(ctx, hold: TaskHold, profile_home) -> None:
             return None
 
     ForwardGuard(hold, target_home).install_when_gateway(_gateway_runner)
+
+
+PEER_APPROVAL_TIMEOUT = 900  # 15 min for prompts of a peer's task (owner decision 2026-10-26)
+
+
+def _current_session_key() -> str:
+    try:
+        from tools.approval_context import get_current_session_key
+        return get_current_session_key("") or ""
+    except Exception:
+        return ""
+
+
+def _longer_peer_approvals(is_peer_task) -> None:
+    """Prompts of a peer's task wait ``PEER_APPROVAL_TIMEOUT`` instead of ``approvals.timeout``: the owner learns of
+    them later than of his own. Hermes reads the timeout through ``approval_context._get_approval_timeout`` at
+    every wait, so one guarded wrap per process covers the gateway wait and the relay's own expiry."""
+    try:
+        from tools import approval_context
+    except Exception:
+        return
+    original = getattr(approval_context, "_get_approval_timeout", None)
+    if original is None or getattr(original, "_a2a_relay_wrapped", False):
+        return
+
+    def timeout() -> int:
+        base = original()
+        try:
+            return max(base, PEER_APPROVAL_TIMEOUT) if is_peer_task() else base
+        except Exception:
+            return base
+
+    timeout._a2a_relay_wrapped = True
+    approval_context._get_approval_timeout = timeout
+    logger.info("a2a-relay: approval prompts of peer tasks wait %d s", PEER_APPROVAL_TIMEOUT)
 
 
 def _sweep_forever(mail, every: float = 60.0) -> None:

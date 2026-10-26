@@ -180,6 +180,10 @@ _TEXTS: dict[str, tuple[str, str]] = {
                        "until their «yes». On «no» the plugin tells the sender itself.",
                        "Перед любой работой коротко перескажи владельцу задачу и спроси «да» или «нет»; инструменты "
                        "заблокированы до его «да». На «нет» плагин сам сообщит отправителю об отказе."),
+    "mail.task_preapproved": ("The owner already approved this task in his chat on {machine}: run it, system "
+                              "changes included, without asking him again.",
+                              "Владелец уже одобрил эту задачу в своём чате на {machine}: выполняй её, включая "
+                              "системные изменения, не спрашивая его снова."),
     "mail.task_reply": ("When done (or if the task cannot be done), send the result in one message: "
                         "session_reply(id=\"{id}\", text=...). Ask the owner questions here, in this chat.",
                         "Когда закончишь (или если задачу сделать нельзя), отправь итог одним сообщением: "

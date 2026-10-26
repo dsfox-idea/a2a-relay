@@ -167,6 +167,123 @@ class ToolGateTests(Env):
         self.assertIn("git pull", records[-1]["what"])
 
 
+class FewerApprovalsTests(Env):
+    """Owner decision 2026-10-26: no approval for reads; one yes per task."""
+
+    def test_read_only_hermes_commands_and_config_reads_pass_at_level1(self):
+        self.set_level(1)
+        for command in ("hermes update --check", "hermes update --plan", "hermes update --list-venv-holders",
+                        "hermes update --plan --list-venv-holders", "hermes config get model",
+                        "hermes -p growser config show", "hermes a2a-relay doctor", "hermes a2a-relay fleet show",
+                        "hermes gateway status", "hermes --version", "hermes tools list",
+                        "env -u NODE_ENV hermes update --plan", "cat ~/.hermes/config.yaml",
+                        "grep -n model ~/.hermes/config.yaml | head -5", "head ~/.hermes/SOUL.md"):
+            self.assertIsNone(self.call("terminal", command=command), command)
+
+    def test_changes_and_secrets_are_still_asked(self):
+        self.set_level(1)
+        for command in ("hermes update", "hermes update --yes --no-gateway-restart", "hermes update --plan --yes",
+                        "hermes config set model.default x", "hermes a2a-relay fleet sync", "hermes plugins install x",
+                        "cat ~/.hermes/.env", "grep KEY ~/.hermes/.env", "hermes config get model; hermes update",
+                        "cat ~/.hermes/config.yaml > /tmp/x", "hermes update --plan | sh",
+                        "env FOO=1 hermes update"):
+            self.assertEqual((self.call("terminal", command=command) or {}).get("action"), "approve", command)
+
+    def _gate(self, task):
+        self.grants = trust.TaskGrants(clock=lambda: self.now, store={})
+        self.now = 1000.0
+        return trust.TrustGate(self.policy, trust.CommandRules(lambda: self.home), self.paths.trust_journal,
+                               is_a2a=lambda: True, grants=self.grants, task_key=lambda: task)
+
+    def test_one_yes_covers_the_rest_of_the_task(self):
+        self.set_level(1)
+        gate = self._gate("agent:main:a2a:dm:ctx1")
+        ask = lambda: (gate.on_pre_tool_call(tool_name="terminal", args={"command": "hermes update"}) or {}).get("action")
+        self.assertEqual(ask(), "approve")
+        self.grants.grant("agent:main:a2a:dm:other")
+        self.assertEqual(ask(), "approve", "another task's yes does not count")
+        self.grants.grant("agent:main:a2a:dm:ctx1")
+        self.assertIsNone(ask())
+        self.assertEqual(gate.auto_decision("hermes update", ["plugin_rule:a2a-trust:terminal"],
+                                            "agent:main:a2a:dm:ctx1"), "once")
+        self.now += trust.GRANT_TTL + 1
+        self.assertEqual(ask(), "approve", "a grant expires")
+
+    def test_a_grant_never_widens_read_only_or_forwarding(self):
+        gate = self._gate("t")
+        self.grants.grant("t")
+        self.set_level(3)
+        self.assertEqual(gate.on_pre_tool_call(tool_name="terminal", args={"command": "git pull"})["action"], "block")
+        self.assertEqual(gate.auto_decision("rm -rf x", ["x"], "t"), "deny")
+        self.set_level(2)
+        self.assertEqual(gate.on_pre_tool_call(tool_name="a2a_call", args={})["action"], "block")
+
+    def test_peer_task_in_an_owner_chat_uses_its_mail_id(self):
+        self.set_level(1)
+        gate = self._gate("")
+        turn = {"mail": "mail-0123456789ab", "approved": True}
+        ask = lambda: (gate.on_pre_tool_call(tool_name="terminal", args={"command": "hermes update"},
+                                             peer_turn=turn) or {}).get("action")
+        self.assertEqual(ask(), "approve")
+        self.grants.grant("mail:mail-0123456789ab")
+        self.assertIsNone(ask())
+
+
+class OwnerChatBridgeTests(Env):
+    """A peer's task in an owner chat gets the same automatic decisions as in an A2A session."""
+
+    def bridge(self, auto, tasks):
+        self.queue, self.allowed = FakeQueue(), []
+        return approvals.ApprovalBridge(self.paths, queue=self.queue, auto_decide=lambda c, k, task: auto,
+                                        task_for_key=lambda key: tasks.get(key, ""),
+                                        on_owner_allowed=self.allowed.append)
+
+    def test_auto_decision_for_a_peer_task_in_an_owner_chat(self):
+        bridge = self.bridge("once", {"agent:main:local:dm:chat": "mail:m1"})
+        bridge.on_pre_approval_request(session_key="agent:main:local:dm:chat", command="rm -rf x", surface="gateway")
+        self.assertEqual(self.queue.resolved, [("once", "req-1", None)])
+
+    def test_the_owners_own_work_is_never_touched(self):
+        bridge = self.bridge("once", {})
+        bridge.on_pre_approval_request(session_key="agent:main:local:dm:chat", command="rm -rf x", surface="gateway")
+        self.assertEqual(self.queue.resolved, [])
+        self.assertEqual(store.read_jsonl(self.paths.approvals), [])
+
+    def test_owners_yes_in_the_chat_grants_the_task_and_no_is_not_a_grant(self):
+        for choice, granted in (("once", ["mail:m1"]), ("session", ["mail:m1"]), ("deny", []), ("timeout", [])):
+            bridge = self.bridge(None, {"agent:main:local:dm:chat": "mail:m1"})
+            bridge.on_pre_approval_request(session_key="agent:main:local:dm:chat", command="hermes update",
+                                           surface="gateway")
+            self.assertEqual(store.read_jsonl(self.paths.approvals), [], "Hermes shows its own prompt in the chat")
+            bridge.on_post_approval_response(session_key="agent:main:local:dm:chat", surface="gateway", choice=choice)
+            self.assertEqual(self.allowed, granted, choice)
+
+    def test_owners_yes_to_an_a2a_prompt_grants_that_session(self):
+        key = "agent:main:a2a:dm:ctx"
+        bridge = self.bridge(None, {key: key})
+        bridge.on_pre_approval_request(session_key=key, command="hermes update", surface="gateway")
+        self.assertEqual(store.read_jsonl(self.paths.approvals)[0]["type"], "request")
+        bridge.on_post_approval_response(session_key=key, surface="gateway", choice="once")
+        self.assertEqual(self.allowed, [key])
+
+
+class PeerTimeoutTests(unittest.TestCase):
+    def test_peer_prompts_wait_longer_and_the_owners_do_not(self):
+        from tools import approval_context
+        relay = sys.modules["a2a_relay_under_test"]
+        original = approval_context._get_approval_timeout
+        peer = [True]
+        try:
+            approval_context._get_approval_timeout = lambda: 300
+            relay._longer_peer_approvals(lambda: peer[0])
+            relay._longer_peer_approvals(lambda: True)  # a second plugin copy does not wrap twice
+            self.assertEqual(approval_context._get_approval_timeout(), relay.PEER_APPROVAL_TIMEOUT)
+            peer[0] = False
+            self.assertEqual(approval_context._get_approval_timeout(), 300)
+        finally:
+            approval_context._get_approval_timeout = original
+
+
 class AutoDecisionTests(Env):
     def test_per_level(self):
         cases = {0: "once", 1: "once", 2: None, 3: "deny"}
@@ -205,14 +322,14 @@ class FakeQueue:
 class BridgeTests(Env):
     def test_auto_decision_settles_without_publishing(self):
         queue = FakeQueue()
-        bridge = approvals.ApprovalBridge(self.paths, queue=queue, auto_decide=lambda c, k: "once")
+        bridge = approvals.ApprovalBridge(self.paths, queue=queue, auto_decide=lambda c, k, task: "once")
         bridge.on_pre_approval_request(session_key="agent:main:a2a:dm:ctx", command="rm -rf x", surface="gateway")
         self.assertEqual(queue.resolved, [("once", "req-1", None)])
         self.assertEqual(store.read_jsonl(self.paths.approvals), [])
 
     def test_undecided_is_published_for_the_owner(self):
         queue = FakeQueue()
-        bridge = approvals.ApprovalBridge(self.paths, queue=queue, auto_decide=lambda c, k: None)
+        bridge = approvals.ApprovalBridge(self.paths, queue=queue, auto_decide=lambda c, k, task: None)
         bridge.on_pre_approval_request(session_key="agent:main:a2a:dm:ctx", command="rm -rf x", surface="gateway")
         self.assertEqual(queue.resolved, [])
         self.assertEqual(store.read_jsonl(self.paths.approvals)[0]["type"], "request")

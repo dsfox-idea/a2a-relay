@@ -95,9 +95,14 @@ class PeerTurns:
             turn = self._turns.get(session_id)
             return dict(turn) if turn else None
 
-    def start(self, session_id: str, mail_id: str, approved: bool) -> None:
+    def start(self, session_id: str, mail_id: str, approved: bool, session_key: str = "") -> None:
         with self._lock:
-            self._turns[session_id] = {"mail": mail_id, "approved": approved}
+            self._turns[session_id] = {"mail": mail_id, "approved": approved, "key": session_key}
+
+    def mail_for_key(self, session_key: str) -> str:
+        """The peer task the chat ``session_key`` works on now, "" when none."""
+        with self._lock:
+            return next((t["mail"] for t in self._turns.values() if session_key and t.get("key") == session_key), "")
 
     def approve(self, session_id: str) -> None:
         with self._lock:
@@ -131,7 +136,8 @@ class SessionMail:
                  level_for: Callable[[str], object], turns: PeerTurns,
                  http_post: Callable[[str, str, dict], tuple[int, object]] = _post_json,
                  clock: Callable[[], float] = time.time, delivery_attempts: int = 60,
-                 delivery_retry: float = 5.0):
+                 delivery_retry: float = 5.0, grants=None):
+        self._grants = grants
         self._store = store
         self._directory = directory
         self._auth = auth
@@ -146,8 +152,12 @@ class SessionMail:
 
     # -- sender side ---------------------------------------------------------------------------
     def send(self, from_key: str, from_session_id: str, from_profile: str, target: str, text: str,
-             machine: str = "", project: str = "") -> str:
+             machine: str = "", project: str = "", preapproved: bool = False,
+             owner_said_yes: bool = False) -> str:
         text = (text or "").strip()
+        if preapproved and not owner_said_yes:
+            return ("Error: preapprove=true needs the owner's plain yes as his latest message in this chat. Show him "
+                    "the exact task text first, ask yes or no, and send it in the turn after his yes.")
         target, project = (target or "").strip(), (project or "").strip().lower()
         if not from_key:
             return "Error: session_send works only from an owner chat (the answer is delivered there)."
@@ -175,7 +185,8 @@ class SessionMail:
         me, secret, _ = self._auth.me_and_peers()
         mail_id = new_id()
         body = {"id": mail_id, "to_session": card["session_key"], "text": text, "hops": hops,
-                "from_title": self._title_of(cards, me, from_key), "from_project": from_project}
+                "from_title": self._title_of(cards, me, from_key), "from_project": from_project,
+                "preapproved": bool(preapproved)}
         status, answer = self._deliver_to_machine(card["machine"], "/send", body, me, secret)
         if status != 202:
             reason = answer.get("error") if isinstance(answer, dict) else answer
@@ -318,7 +329,8 @@ class SessionMail:
         level = self._level_for(profile)
         record = {"id": mail_id, "from_machine": caller, "from_title": str(body.get("from_title") or ""),
                   "to_session": card["session_key"], "profile": profile, "hops": hops,
-                  "level": getattr(level, "number", 1), "received_at": self._clock(), "replied": False}
+                  "level": getattr(level, "number", 1), "received_at": self._clock(), "replied": False,
+                  "preapproved": body.get("preapproved") is True}
         self._store.save("in", record)
         if not inject(card["session_key"], self.frame(record, text, level)):
             self._store.drop("in", mail_id)
@@ -335,7 +347,9 @@ class SessionMail:
                  t("mail.task_note", number=number, name=name)]
         if not getattr(level, "neutral_framing", False):
             lines.append(t("mail.task_external"))
-        if hold:
+        if record.get("preapproved"):
+            lines.append(t("mail.task_preapproved", machine=record["from_machine"]))
+        elif hold:
             lines.append(t("mail.task_hold"))
         lines.append(t("mail.task_reply", id=record["id"]))
         return "\n".join(lines)
@@ -375,7 +389,11 @@ class SessionMail:
             if record is None or record.get("to_session") != session_key:
                 self.turns.end(session_id)
                 return None
-            self.turns.start(session_id, record["id"], approved=not self._holds(record))
+            preapproved = bool(record.get("preapproved"))
+            self.turns.start(session_id, record["id"], approved=preapproved or not self._holds(record),
+                             session_key=session_key)
+            if preapproved and self._grants is not None:
+                self._grants.grant(f"mail:{record['id']}")
             return None
         turn = self.turns.get(session_id)
         if turn and not turn["approved"] and is_relay_text(text):

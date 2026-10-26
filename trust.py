@@ -14,7 +14,9 @@ import json
 import logging
 import re
 import shlex
+import sys
 import time
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -157,28 +159,51 @@ _FIND_WRITES = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fpr
 _SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&", "(", ")", ";;"})
 
 
-def _writes_relay_dir(command: str) -> bool:
-    """True when a command that names ``a2a_relay`` may write: anything but plain reads (#15).
+_ENV_FILE = re.compile(r"(?:^|[/\\\s'\"])\.env\b", re.IGNORECASE)
+# Hermes subcommands that only read (owner decision 2026-10-26: no approval for them). Anything else under
+# ``hermes`` is judged by the system-change patterns.
+_HERMES_READS: dict[str, frozenset] = {
+    "update": frozenset({"--check", "--plan", "--list-venv-holders", "--install-id"}),
+    "config": frozenset({"get", "show", "path", "env-path", "check"}),
+    "tools": frozenset({"list", "--summary"}),
+    "gateway": frozenset({"status", "list"}),
+    "plugins": frozenset({"list"}),
+    "a2a-relay": frozenset({"doctor"}),
+}
 
-    A command that mentions the directory anywhere is allowed only when EVERY part of it is a read
-    (``cd ~/.hermes/a2a_relay && echo x > trust.json`` names the directory in a harmless part and writes in
-    another), output goes nowhere but /dev/null or another descriptor, and nothing is substituted."""
-    if not _RELAY_WORD.search(command):
-        return False
-    if "`" in command or "$(" in command or "${" in command:
+
+def _hermes_reads(rest: list[str]) -> bool:
+    while len(rest) >= 2 and rest[0] in ("-p", "--profile"):
+        rest = rest[2:]
+    if rest in (["--version"], ["version"], ["status"], ["doctor"]):
         return True
+    if not rest or rest[0] not in _HERMES_READS:
+        return False
+    allowed, args = _HERMES_READS[rest[0]], rest[1:]
+    if rest[0] == "update":
+        return bool(args) and all(a in allowed for a in args)
+    if rest[0] == "a2a-relay" and args[:2] == ["fleet", "show"]:
+        return True
+    return bool(args) and args[0] in allowed
+
+
+def _only_reads(command: str) -> bool:
+    """True when EVERY part of a command is a read: plain readers (cat, grep, ...), read-only hermes
+    subcommands, output to /dev/null or another descriptor only, nothing substituted (#15)."""
+    if not (command or "").strip() or "`" in command or "$(" in command or "${" in command:
+        return False
     try:
         lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
-        return True
+        return False
     segment: list[str] = []
     expect: Optional[str] = None  # "file": the redirect target must be /dev/null; "fd": a descriptor
     for token in tokens + [";"]:
         if expect is not None:
             if (expect == "file" and token != "/dev/null") or (expect == "fd" and not re.fullmatch(r"\d+|-", token)):
-                return True
+                return False
             expect = None
             continue
         if token in (">", ">>", "&>", "&>>", ">|"):
@@ -186,25 +211,68 @@ def _writes_relay_dir(command: str) -> bool:
         elif token == ">&":
             expect = "fd"
         elif token.startswith(">") or token.startswith("<<"):
-            return True  # other redirect forms, heredocs: not worth parsing
+            return False  # other redirect forms, heredocs: not worth parsing
         elif token in _SEPARATORS:
-            if segment and _segment_writes(segment):
-                return True
+            if segment and not _segment_reads(segment):
+                return False
             segment = []
         elif token != "<":
             segment.append(token)
-    return False
+    return True
 
 
-def _segment_writes(words: list[str]) -> bool:
+def _segment_reads(words: list[str]) -> bool:
     head, rest = Path(words[0]).name.lower().removesuffix(".exe"), words[1:]
+    if head == "env":  # env -u NAME / NAME=value prefixes only change the environment of the command
+        while rest and (rest[0] in ("-i", "-u") or "=" in rest[0]):
+            rest = rest[2:] if rest[0] == "-u" else rest[1:]
+        return bool(rest) and _segment_reads(rest)
+    if head == "hermes":
+        return _hermes_reads(rest)
     if head not in _RELAY_READERS:
-        return True
+        return False
     if head == "find":
-        return any(a in _FIND_WRITES for a in rest)
+        return not any(a in _FIND_WRITES for a in rest)
     if head == "rg":
-        return any(a == "--pre" or a.startswith("--pre=") for a in rest)
-    return False
+        return not any(a == "--pre" or a.startswith("--pre=") for a in rest)
+    return True
+
+
+def _writes_relay_dir(command: str) -> bool:
+    """True when a command that names ``a2a_relay`` may write: anything but plain reads (#15)."""
+    return bool(_RELAY_WORD.search(command)) and not _only_reads(command)
+
+
+_GRANTS_MODULE = "_a2a_relay_task_grants"
+GRANT_TTL = 4 * 3600.0
+
+
+class TaskGrants:
+    """Tasks the owner already said yes to (owner decision 2026-10-26: one yes per task). After his yes to
+    one system change of a task, its further system changes run without asking again. A task is an A2A
+    session key, or ``mail:<id>`` for a peer's task in an owner chat. Process-wide: every profile's plugin
+    copy sees the same grants. Grants expire after ``GRANT_TTL``."""
+
+    def __init__(self, clock: Callable[[], float] = time.time, store: Optional[dict] = None):
+        if store is None:
+            module = sys.modules.setdefault(_GRANTS_MODULE, types.ModuleType(_GRANTS_MODULE))
+            store = module.__dict__.setdefault("grants", {})
+        self._grants = store
+        self._clock = clock
+
+    def grant(self, task: str) -> None:
+        if task:
+            self._grants[task] = self._clock() + GRANT_TTL
+            logger.info("a2a-relay: owner said yes to task %s; its system changes are not asked again", task)
+
+    def has(self, task: str) -> bool:
+        expires = self._grants.get(task) if task else None
+        if expires is None:
+            return False
+        if expires > self._clock():
+            return True
+        self._grants.pop(task, None)
+        return False
 
 
 class CommandRules:
@@ -216,6 +284,8 @@ class CommandRules:
     @staticmethod
     def is_system_change(command: str) -> bool:
         text = (command or "").lower()
+        if _only_reads(command or "") and not _ENV_FILE.search(text):
+            return False  # reads of config.yaml / SOUL.md / a2a_relay and read-only hermes commands
         if _PIP_INSTALL.search(text) and not re.search(r"venv[\\/]", text):
             return True
         return any(p.search(text) for p in _SYSTEM_COMMANDS) or _writes_relay_dir(command or "")
@@ -302,7 +372,10 @@ class TrustGate:
 
     def __init__(self, policy: TrustPolicy, rules: CommandRules, journal: Path,
                  is_a2a: Callable[[], bool] = current_session_is_a2a, clock: Callable[[], float] = time.time,
-                 owner_said_yes: Callable[[], bool] = lambda: False):
+                 owner_said_yes: Callable[[], bool] = lambda: False, grants: Optional[TaskGrants] = None,
+                 task_key: Callable[[], str] = lambda: _session_env("HERMES_SESSION_KEY")):
+        self._grants = grants or TaskGrants(clock)
+        self._task_key = task_key
         self._policy = policy
         self._rules = rules
         self._journal = journal
@@ -332,7 +405,7 @@ class TrustGate:
                     f"Refused: at A2A trust level {level.number} '{level.name}' a peer's task runs only after "
                     "the owner says yes in this chat. Retell the task to them in two lines and ask yes or no; "
                     "then end the turn.")}
-            return self._decide(level, tool_name, args, approved=True)
+            return self._decide(level, tool_name, args, approved=True, task=f"mail:{peer_turn.get('mail') or ''}")
         if tool_name in ASK_TOOLS:
             # In an A2A session the question goes back to the calling agent, not to the owner, and nobody answers
             # it: the turn hung for the whole clarify timeout (m4, 2026-10-24). Owner approvals come from the trust
@@ -343,9 +416,10 @@ class TrustGate:
                 "Refused: an A2A session has no human to answer questions; the owner of this machine does not see "
                 "them. Do not ask. Run the task as given; a command that needs the owner's approval is sent to "
                 "the owner automatically by the trust level. If something is unclear, say so in your reply.")}
-        return self._decide(level, tool_name, args, approved=self._owner_said_yes())
+        return self._decide(level, tool_name, args, approved=self._owner_said_yes(), task=self._task_key())
 
-    def _decide(self, level: TrustLevel, tool_name: str, args: dict, approved: bool) -> Optional[dict]:
+    def _decide(self, level: TrustLevel, tool_name: str, args: dict, approved: bool,
+                task: str = "") -> Optional[dict]:
         command = str(args.get("command") or "") if tool_name == "terminal" else ""
         if level.hold_for_owner and not approved:
             self.note("refused", f"{tool_name} (task not approved)", level, _session_env("HERMES_SESSION_USER_ID"))
@@ -371,6 +445,10 @@ class TrustGate:
                   tool_name in ("write_file", "patch") and self._rules.is_protected_path(str(args.get("path") or "")))
         if not system:
             return None
+        if self._grants.has(task):
+            self.note("allowed (owner said yes to this task)", f"{tool_name}: {command}" if command else tool_name,
+                      level, task)
+            return None
         if level.approvals == "allow_list" and command and \
                 self._rules.matches_allow_list(command, self._policy.allow_list()):
             return None
@@ -378,13 +456,15 @@ class TrustGate:
                 "message": f"system change requested by an A2A peer (trust level {level.number} '{level.name}')"}
 
     # -- approval prompts -------------------------------------------------------------------------
-    def auto_decision(self, command: str, pattern_keys: Iterable[str]) -> Optional[str]:
-        """``"once"`` / ``"deny"`` to settle an approval prompt of an A2A session without the owner, or
-        None to ask the owner."""
+    def auto_decision(self, command: str, pattern_keys: Iterable[str], task: str = "") -> Optional[str]:
+        """``"once"`` / ``"deny"`` to settle an approval prompt of a peer's task (A2A session, or a peer's task
+        in an owner chat) without the owner, or None to ask the owner."""
         level = self._policy.level()
         escalated = any(str(k).startswith(f"plugin_rule:{ESCALATION_RULE}") for k in pattern_keys or ())
         if level.approvals == "read_only":
             return "deny"
+        if self._grants.has(task):
+            return "once"
         if escalated:
             return None
         if level.approvals == "all":

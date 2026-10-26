@@ -71,20 +71,29 @@ class ApprovalBridge:
 
     def __init__(self, paths: RelayPaths, queue: Optional[GatewayQueue] = None,
                  clock: Callable[[], float] = time.time,
-                 auto_decide: Optional[Callable[[str, list], Optional[str]]] = None):
+                 auto_decide: Optional[Callable[[str, list, str], Optional[str]]] = None,
+                 task_for_key: Optional[Callable[[str], str]] = None,
+                 on_owner_allowed: Callable[[str], None] = lambda task: None):
         self._paths = paths
         self._queue = queue or GatewayQueue()
         self._clock = clock
-        self._auto_decide = auto_decide or (lambda command, pattern_keys: None)
+        self._auto_decide = auto_decide or (lambda command, pattern_keys, task: None)
+        # Which peer task a prompt belongs to: an A2A session (its key), or a peer's task running in an owner chat
+        # (``mail:<id>``); "" for the owner's own work, which the relay never touches.
+        self._task_for_key = task_for_key or (lambda key: key if A2A_SESSION_MARKER in key else "")
+        self._on_owner_allowed = on_owner_allowed
         self._lock = threading.Lock()
-        self._tracked: dict[str, str] = {}  # request_id -> session_key
+        self._tracked: dict[str, tuple[str, str]] = {}  # request_id -> (session_key, task), left to the owner
 
     def on_pre_approval_request(self, session_key: str = "", command: str = "", description: str = "",
                                 surface: str = "", coalesced: bool = False, pattern_keys=None,
                                 **_: object) -> None:
-        if surface != "gateway" or coalesced or A2A_SESSION_MARKER not in (session_key or ""):
+        if surface != "gateway" or coalesced:
             return
-        auto = self._auto_decide(command, list(pattern_keys or []))
+        task = self._task_for_key(session_key or "")
+        if not task:
+            return
+        auto = self._auto_decide(command, list(pattern_keys or []), task)
         with self._lock:
             request_id = self._queue.find_request_id(session_key, command, set(self._tracked))
             if not request_id:
@@ -95,7 +104,9 @@ class ApprovalBridge:
                                                None if auto == ALLOW else "refused by the A2A trust level")
                 logger.info("a2a-relay: trust level settled approval %s as %s (%d)", request_id[:8], auto, resolved)
                 return
-            self._tracked[request_id] = session_key
+            self._tracked[request_id] = (session_key, task)
+        if A2A_SESSION_MARKER not in session_key:
+            return  # a peer's task in an owner chat: the owner sees Hermes' own prompt right there
         now = self._clock()
         timeout = _approval_timeout()
         append_jsonl(self._paths.approvals, {
@@ -109,17 +120,21 @@ class ApprovalBridge:
 
     def on_post_approval_response(self, session_key: str = "", surface: str = "", choice: str = "",
                                   **_: object) -> None:
-        if surface != "gateway" or A2A_SESSION_MARKER not in (session_key or ""):
+        if surface != "gateway":
             return
         with self._lock:
-            finished = [rid for rid, key in self._tracked.items()
+            finished = [(rid, task) for rid, (key, task) in self._tracked.items()
                         if key == session_key and not self._queue.is_pending(key, rid)]
-            for rid in finished:
+            for rid, _ in finished:
                 self._tracked.pop(rid, None)
-        for rid in finished:
-            append_jsonl(self._paths.approvals, {"type": "resolved", "request_id": rid, "choice": str(choice),
-                                                 "ts": self._clock()})
+        allowed = str(choice) in (ALLOW, "session", "always")
+        for rid, task in finished:
+            if A2A_SESSION_MARKER in session_key:
+                append_jsonl(self._paths.approvals, {"type": "resolved", "request_id": rid, "choice": str(choice),
+                                                     "ts": self._clock()})
             logger.info("a2a-relay: approval %s finished with %s", rid[:8], choice)
+            if allowed:
+                self._on_owner_allowed(task)
 
     def _await_decision(self, request_id: str, session_key: str, timeout: float) -> None:
         deadline = time.monotonic() + timeout + 5
