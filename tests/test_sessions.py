@@ -57,55 +57,6 @@ class LocalSessionsTests(unittest.TestCase):
         self.assertEqual(sessions._profile_name("C:/Users/x/AppData/Local/hermes"), "default")
 
 
-class TwoRegistriesTests(unittest.TestCase):
-    """#5: m5's TUI windows live in tui_gateway.server._sessions, the Windows TUI in the session authorities."""
-
-    def test_merge_lists_a_chat_once(self):
-        merged = sessions.merge_chats([chat("s1"), chat("s2")], [chat("s2"), chat("s3", session_key="k3")],
-                                      [{"id": "other", "session_key": "k3"}])
-        self.assertEqual([c["id"] for c in merged], ["s1", "s2", "s3"])
-
-    def test_tui_windows_are_read_from_the_tui_server(self):
-        import threading
-        import types
-        server = types.ModuleType("tui_gateway.server")
-        agent = types.SimpleNamespace(session_id="20261024_113205_83923b", model="opus")
-        server._sessions_lock = threading.RLock()
-        server._sessions = {
-            "5b9bf1aa": {"agent": agent, "session_key": "20261024_113205_83923b", "running": True,
-                         "cwd": "/Users/x/dev/p", "profile_home": "/Users/x/.hermes/profiles/work", "source": "tui"},
-            "dead": {"_finalized": True},
-            "closing": {"_closing": True},
-        }
-        server._session_live_item = lambda sid, s: {"session_key": s["session_key"], "title": "Build",
-                                                    "model": "opus", "started_at": 1, "last_active": 2,
-                                                    "preview": "x" * 500}
-        saved = sys.modules.get("tui_gateway.server")
-        sys.modules["tui_gateway.server"] = server
-        original = sessions._gateway_runner_now
-        sessions._gateway_runner_now = lambda: object()
-        try:
-            chats = sessions._tui_chats()
-            sessions._gateway_runner_now = lambda: None
-            self.assertEqual(sessions._tui_chats(), [], "a process that is not the gateway lists nothing")
-        finally:
-            sessions._gateway_runner_now = original
-            if saved is None:
-                sys.modules.pop("tui_gateway.server", None)
-            else:
-                sys.modules["tui_gateway.server"] = saved
-        self.assertEqual(len(chats), 1)
-        card = chats[0]
-        self.assertEqual((card["id"], card["session_key"], card["status"], card["profile"], card["title"]),
-                         ("5b9bf1aa", "20261024_113205_83923b", "working", "work", "Build"))
-        self.assertEqual(len(card["preview"]), sessions._PREVIEW)
-
-    def test_a_broken_registry_does_not_hide_the_other(self):
-        def broken():
-            raise RuntimeError("registry changed")
-        self.assertEqual(sessions._safe(broken), [])
-
-
 class GuardTests(unittest.TestCase):
     def test_one_server_per_process_across_plugin_copies(self):
         self.assertIs(sessions._process_guard(), sessions._process_guard())

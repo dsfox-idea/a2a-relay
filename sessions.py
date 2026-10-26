@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hmac
 import json
-import os
 import logging
 import sys
 import threading
@@ -66,7 +65,7 @@ class LocalSessions:
 
     def __init__(self, machine: Callable[[], str], live: Optional[Callable[[], list[dict]]] = None):
         self._machine = machine
-        self._live = live or _all_chats
+        self._live = live or _gateway_chats
 
     def cards(self) -> list[dict]:
         cards = []
@@ -86,92 +85,6 @@ class LocalSessions:
 def _profile_name(home: str) -> str:
     path = Path(str(home))
     return path.name if path.parent.name == "profiles" else "default"
-
-
-def merge_chats(*sources: list[dict]) -> list[dict]:
-    """One card per chat: a chat known to several registries is listed once (first source wins)."""
-    seen: set[str] = set()
-    merged = []
-    for chats in sources:
-        for chat in chats:
-            names = {str(chat.get(k) or "") for k in ("id", "session_key")} - {""}
-            if names & seen:
-                continue
-            seen |= names
-            merged.append(chat)
-    return merged
-
-
-def _all_chats() -> list[dict]:
-    # Two registries hold the owner's chats in a gateway process: the session authorities (LOCAL sessions,
-    # e.g. the Windows TUI) and tui_gateway.server._sessions (TUI windows attached to the shared gateway over
-    # its websocket, e.g. on macOS). 0.8.1 read only the first one and missed m5's windows (#5).
-    return merge_chats(_safe(_gateway_chats), _safe(_tui_chats))
-
-
-def _safe(source: Callable[[], list[dict]]) -> list[dict]:
-    try:
-        return source()
-    except Exception:
-        logger.warning("a2a-relay: could not list chats from %s", getattr(source, "__name__", source), exc_info=True)
-        return []
-
-
-def _tui_chats() -> list[dict]:
-    """Chats of TUI/desktop windows served by this process's tui_gateway server."""
-    server = sys.modules.get("tui_gateway.server")
-    if server is None or _gateway_runner_now() is None:
-        return []  # only the gateway process lists; a standalone TUI process is not reachable anyway
-    with server._sessions_lock:
-        live = [(sid, session) for sid, session in server._sessions.items()
-                if isinstance(session, dict) and not session.get("_finalized") and not session.get("_closing")]
-    chats = []
-    for sid, session in live:
-        item = server._session_live_item(sid, session)
-        home = session.get("profile_home")
-        chats.append({"id": sid, "session_key": item.get("session_key") or sid, "title": item.get("title") or "",
-                      "profile": _profile_name(str(home)) if home else "default",
-                      "source": str(session.get("source") or "tui"),
-                      "status": "working" if session.get("running") else "idle",
-                      "model": item.get("model") or "", "cwd": str(session.get("cwd") or ""),
-                      "started_at": float(item.get("started_at") or 0),
-                      "last_active": float(item.get("last_active") or 0),
-                      "preview": str(item.get("preview") or "")[:_PREVIEW]})
-    return chats
-
-
-def registry_stats() -> dict:
-    """Why a chat is or is not listed: what each registry holds, and what the filters drop (#5 diagnosis)."""
-    stats: dict = {"pid": os.getpid(), "tui_modules": sorted(m for m in sys.modules if m.startswith("tui_gateway"))[:20]}
-    server = sys.modules.get("tui_gateway.server")
-    if server is not None:
-        with server._sessions_lock:
-            stats["tui_sessions"] = [{"id": sid, "key": str(s.get("session_key") or ""),
-                                      "finalized": bool(s.get("_finalized")), "closing": bool(s.get("_closing"))}
-                                     for sid, s in server._sessions.items() if isinstance(s, dict)][:30]
-    runner = _gateway_runner_now()
-    stats["gateway"] = runner is not None
-    if runner is None:
-        return stats
-    from gateway.session_authorities import all_authorities
-    rows = []
-    for authority in all_authorities(runner):
-        if authority is None:
-            continue
-        for sid, live in list(authority.sessions.items()):
-            source = getattr(live, "source", None)
-            rows.append({"profile": _profile_name(authority.profile_id), "id": sid,
-                         "platform": str(getattr(getattr(source, "platform", None), "value", "")),
-                         "subscribers": len(getattr(live, "subscribers", None) or ()),
-                         "superseded": bool(getattr(live, "superseded", False)),
-                         "retiring": bool(getattr(authority, "retiring", False))})
-    stats["authority_sessions"] = rows[:40]
-    return stats
-
-
-def _gateway_runner_now():
-    from .restart import _gateway_runner
-    return _gateway_runner()
 
 
 def _gateway_chats() -> list[dict]:
@@ -344,17 +257,11 @@ class SessionServer:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 (http.server API)
-                path, _, query = self.path.partition("?")
-                if path not in ("/sessions", "/sessions/debug"):
+                if self.path.split("?", 1)[0] != "/sessions":
                     return self._send(404, {"error": "not found"})
                 caller = auth.caller(self.headers.get("Authorization", ""))
                 if caller is None:
                     return self._send(401, {"error": "fleet token required"})
-                if path == "/sessions/debug":
-                    try:
-                        return self._send(200, {"stats": registry_stats(), "sessions": local.cards()})
-                    except Exception as exc:
-                        return self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
                 self._send(200, {"sessions": local.cards()})
 
             def do_POST(self):  # noqa: N802 (http.server API)
