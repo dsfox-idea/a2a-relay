@@ -224,6 +224,11 @@ hermes --run-module unittest discover -s ~/dev/a2a-relay/tests -v
 
 `hermes --run-module` uses Hermes' own interpreter; a bare `python3` lacks its dependencies.
 
+There is no hosted CI. A `pre-push` hook runs the whole suite before every push; enable it once
+per clone with `git config core.hooksPath .githooks` (skip once with `git push --no-verify`).
+After each release every fleet machine runs the suite on its own platform (Windows, macOS);
+Linux is not covered until a Linux machine joins the fleet.
+
 ## License
 
 MIT
