@@ -456,8 +456,13 @@ class TrustGate:
         if level.approvals == "allow_list" and command and \
                 self._rules.matches_allow_list(command, self._policy.allow_list()):
             return None
+        # Hermes shows a plugin prompt as "<tool> (plugin approval rule)": the command itself rides in the
+        # message, or the owner answers blind (seen on m5: 5 prompts with nothing but "<terminal>").
+        what = command or str(args.get("path") or "")
+        what = what if len(what) <= 300 else what[:300] + "..."
         return {"action": "approve", "rule_key": f"{ESCALATION_RULE}:{tool_name}",
-                "message": f"system change requested by an A2A peer (trust level {level.number} '{level.name}')"}
+                "message": (f"system change requested by an A2A peer (trust level {level.number} '{level.name}')"
+                            + (f": {what}" if what else ""))}
 
     # -- approval prompts -------------------------------------------------------------------------
     def auto_decision(self, command: str, pattern_keys: Iterable[str], task: str = "") -> Optional[str]:

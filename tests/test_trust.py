@@ -193,6 +193,15 @@ class FewerApprovalsTests(Env):
                         "cat x | sort --output=~/.hermes/a2a_relay/trust.json"):
             self.assertEqual((self.call("terminal", command=command) or {}).get("action"), "approve", command)
 
+    def test_the_prompt_names_the_command(self):
+        self.set_level(1)
+        result = self.call("terminal", command="hermes update --yes")
+        self.assertIn("hermes update --yes", result["message"])
+        result = self.call("write_file", path=str(self.home / "config.yaml"), content="x")
+        self.assertIn("config.yaml", result["message"])
+        long = self.call("terminal", command="brew install " + "x" * 500)["message"]
+        self.assertTrue(long.endswith("...") and len(long) < 450)
+
     def _gate(self, task):
         self.grants = trust.TaskGrants(clock=lambda: self.now, store={})
         self.now = 1000.0
