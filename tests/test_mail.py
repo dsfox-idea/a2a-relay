@@ -37,9 +37,9 @@ class Directory:
         return list(self.local)
 
 
-def card(machine, key, title="", profile="default"):
+def card(machine, key, title="", profile="default", project="growser"):
     return {"machine": machine, "id": key.rsplit(":", 1)[-1], "session_key": key, "title": title,
-            "profile": profile, "status": "idle"}
+            "profile": profile, "status": "idle", "project": project, "repo": project}
 
 
 class Fleet:
@@ -161,6 +161,86 @@ class SendReplyTests(unittest.TestCase):
         status, _ = self.m4.handle_send("win", {"id": "../../x", "to_session": self.fleet.m4_chat, "text": "x"},
                                         self.fleet.cards)
         self.assertEqual(status, 400)
+
+
+class ProjectRuleTests(unittest.TestCase):
+    """#17: a project chat takes tasks only from its own project; machine tasks go to the hermes-... chat."""
+
+    def setUp(self):
+        self.fleet = Fleet()
+        self.win, self.m4 = self.fleet.box["win"], self.fleet.box["m4"]
+        self.cards = self.fleet.cards
+
+    def tearDown(self):
+        self.fleet.close()
+
+    def add(self, machine, key, title, project):
+        self.cards.append(card(machine, key, title, project=project))
+
+    def by_project(self, project, machine=""):
+        return self.win.send(self.fleet.win_chat, "sid-w", "default", "", "do it", machine=machine, project=project)
+
+    def test_by_project_finds_the_one_open_chat(self):
+        result = self.by_project("GROWSER")
+        self.assertIn("Delivered to m4", result)
+        self.assertEqual(self.fleet.injected["m4"][-1][0], self.fleet.m4_chat)
+
+    def test_no_chat_of_the_project_is_not_delivered(self):
+        result = self.by_project("treelume")
+        self.assertIn("not delivered: no open chat of project treelume", result)
+        self.assertEqual(self.fleet.injected["m4"], [])
+
+    def test_several_chats_of_the_project_are_listed_for_the_sender(self):
+        self.add("m4", "agent:main:local:dm:m2", "growser 2", "growser")
+        result = self.by_project("growser")
+        self.assertIn("several open chats of project growser", result)
+        self.assertIn("m1", result)
+        self.assertIn("m2", result)
+        self.assertEqual(self.fleet.injected["m4"], [])
+        self.assertIn("Delivered to m4", self.win.send(self.fleet.win_chat, "sid-w", "default", "m2", "do it"))
+
+    def test_a_project_chat_refuses_another_project(self):
+        self.cards[0]["project"] = "treelume"
+        result = self.win.send(self.fleet.win_chat, "sid-w", "default", "m1", "do it")
+        self.assertIn("not sent", result)
+        self.assertIn("only from chats of project growser", result)
+        self.assertEqual(self.fleet.injected["m4"], [])
+
+    def test_a_chat_outside_any_project_cannot_task_a_project_chat(self):
+        self.cards[0]["project"] = ""
+        self.assertIn("a chat outside any project", self.win.send(self.fleet.win_chat, "sid-w", "default", "m1", "x"))
+
+    def test_the_target_machine_checks_the_rule_itself(self):
+        # A sender with older code (no check, wrong project) is refused by the receiving machine.
+        status, body = self.m4.handle_send("win", {"id": mail_mod.new_id(), "to_session": self.fleet.m4_chat,
+                                                   "text": "x", "from_project": "treelume"}, self.cards)
+        self.assertEqual(status, 403)
+        self.assertIn("project growser", body["error"])
+        status, _ = self.m4.handle_send("win", {"id": mail_mod.new_id(), "to_session": self.fleet.m4_chat,
+                                                "text": "x"}, self.cards)
+        self.assertEqual(status, 403)
+        self.assertEqual(self.fleet.injected["m4"], [])
+
+    def test_the_service_chat_takes_any_task_and_is_not_a_project_target(self):
+        self.cards[0]["project"] = ""
+        self.add("m4", "agent:main:local:dm:svc", "hermes-m4", "")
+        self.assertIn("Delivered to m4", self.win.send(self.fleet.win_chat, "sid-w", "default", "svc", "update"))
+        self.assertEqual(self.fleet.injected["m4"][-1][0], "agent:main:local:dm:svc")
+        self.cards[-1]["project"] = "growser"  # a hermes-... chat inside a repo is still the service chat
+        self.cards[1]["project"] = "other"
+        self.assertIn("no open chat of project growser", self.by_project("growser"))
+
+    def test_a_chat_neither_project_nor_service_takes_nothing(self):
+        self.cards[1]["project"] = ""
+        self.assertIn("neither a project chat nor the service chat",
+                      self.win.send(self.fleet.win_chat, "sid-w", "default", "m1", "x"))
+
+    def test_project_name(self):
+        sessions = import_module(pkg.__name__ + ".sessions")
+        self.assertEqual(sessions.project_name("https://github.com/dsfox-idea/Growser.git", "A:/dev/x"), "growser")
+        self.assertEqual(sessions.project_name("git@github.com:dsfox-idea/a2a-relay.git", "/x"), "a2a-relay")
+        self.assertEqual(sessions.project_name("", "/Users/dsfox/dev/m4.config"), "m4.config")
+        self.assertEqual(sessions.project_name("https://example.com/repo/", "/x"), "repo")
 
 
 class TurnTests(unittest.TestCase):

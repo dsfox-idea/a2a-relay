@@ -29,6 +29,7 @@ from typing import Callable, Optional
 from .delivery import ChatDelivery
 from .i18n import TAG, is_relay_text, t
 from .replies import parse_answer
+from .sessions import admits, is_service_card
 from .store import write_json_atomic
 
 logger = logging.getLogger("a2a_relay")
@@ -145,18 +146,27 @@ class SessionMail:
 
     # -- sender side ---------------------------------------------------------------------------
     def send(self, from_key: str, from_session_id: str, from_profile: str, target: str, text: str,
-             machine: str = "") -> str:
+             machine: str = "", project: str = "") -> str:
         text = (text or "").strip()
+        target, project = (target or "").strip(), (project or "").strip().lower()
         if not from_key:
             return "Error: session_send works only from an owner chat (the answer is delivered there)."
-        if not text or not (target or "").strip():
-            return "Error: both 'session' and 'text' are required."
+        if not text or not (target or project):
+            return "Error: 'text' and one of 'project' or 'session' are required."
         if len(text) > MAX_TEXT:
             return f"Error: the task is longer than {MAX_TEXT} characters; shorten it."
         cards, problems = self._directory.collect()
-        card, error = self._resolve(cards, problems, target.strip(), (machine or "").strip(), from_key)
+        machine = (machine or "").strip()
+        if target:
+            card, error = self._resolve(cards, problems, target, machine, from_key)
+        else:
+            card, error = self._resolve_project(cards, problems, project, machine, from_key)
         if card is None:
             return f"Error: {error}"
+        from_project = self._project_of(cards, self._auth.me_and_peers()[0], from_key)
+        refusal = admits(card, from_project)
+        if refusal:
+            return f"Error: not sent: {refusal}."
         inbound = self.turns.get(from_session_id)
         record = self._store.load("in", inbound["mail"]) if inbound else None
         hops = int(record.get("hops", 0)) + 1 if record else 0
@@ -165,7 +175,7 @@ class SessionMail:
         me, secret, _ = self._auth.me_and_peers()
         mail_id = new_id()
         body = {"id": mail_id, "to_session": card["session_key"], "text": text, "hops": hops,
-                "from_title": self._title_of(cards, me, from_key)}
+                "from_title": self._title_of(cards, me, from_key), "from_project": from_project}
         status, answer = self._deliver_to_machine(card["machine"], "/send", body, me, secret)
         if status != 202:
             reason = answer.get("error") if isinstance(answer, dict) else answer
@@ -197,6 +207,28 @@ class SessionMail:
                           + "; pass the full session id from sessions_list.")
         unreachable = f" Unreachable machines: {', '.join(sorted(problems))}." if problems else ""
         return None, f"no open chat '{target}' (call sessions_list for the current ids).{unreachable}"
+
+    @staticmethod
+    def _resolve_project(cards: list[dict], problems: dict, project: str, machine: str,
+                         own_key: str) -> tuple[Optional[dict], str]:
+        """The one open chat of ``project``: none -> not delivered, several -> the sender picks one."""
+        found = [c for c in cards if (not machine or c.get("machine") == machine) and c.get("session_key") != own_key
+                 and str(c.get("project") or "").lower() == project and not is_service_card(c)]
+        if len(found) == 1:
+            return found[0], ""
+        if found:
+            return None, (f"several open chats of project {project}: "
+                          + "; ".join(f"{c.get('machine')} \"{c.get('title') or '-'}\" {c.get('session_key')}"
+                                      for c in found)
+                          + ". Pick one and pass its id as 'session'.")
+        unreachable = f" Unreachable machines: {', '.join(sorted(problems))}." if problems else ""
+        return None, (f"not delivered: no open chat of project {project}"
+                      + (f" on {machine}" if machine else "") + "; ask the owner to open one." + unreachable)
+
+    @staticmethod
+    def _project_of(cards: list[dict], machine: str, key: str) -> str:
+        return next((str(c.get("project") or "") for c in cards if c.get("machine") == machine
+                     and c.get("session_key") == key), "")
 
     @staticmethod
     def _title_of(cards: list[dict], machine: str, key: str) -> str:
@@ -275,6 +307,10 @@ class SessionMail:
         card = next((c for c in cards if c.get("session_key") == body.get("to_session")), None)
         if card is None:
             return 404, {"error": "chat is not open"}
+        refusal = admits(card, str(body.get("from_project") or ""))
+        if refusal:
+            logger.info("a2a-relay: %s from %s refused for %s: %s", mail_id, caller, card["session_key"], refusal)
+            return 403, {"error": refusal}
         profile = str(card.get("profile") or "default")
         inject = self._injector(profile)
         if inject is None:

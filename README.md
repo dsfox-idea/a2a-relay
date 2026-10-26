@@ -45,8 +45,8 @@ listens on port 9900, a2a-relay on 9901. Allow TCP 9900 and 9901 between them in
 4. **Open a service chat** on each machine and title it with the `hermes-` prefix (`/title hermes-win`).
    A2A notices and approval requests of that machine go only there.
 
-5. **Try it** in a chat on win: "list my open chats on all machines" (`sessions_list`), then "ask the
-   chat on mac that works on project X to run its tests" (`session_send`). The task appears in that
+5. **Try it** in a chat on win: "list my open chats on all machines" (`sessions_list`), then, from a
+   chat of project X, "ask the chat of project X on mac to run its tests" (`session_send`). The task appears in that
    chat on mac, and its answer comes back to your chat on win.
 
 ## What you get
@@ -55,8 +55,8 @@ listens on port 9900, a2a-relay on 9901. Allow TCP 9900 and 9901 between them in
 
 | Tool | What it does |
 |---|---|
-| `sessions_list` | Open chats on every machine: machine, profile, idle/working, repo@branch or folder, title, last message. Unreachable machines are listed too. |
-| `session_send(session, text)` | Hands a task to one of those chats. It runs there as a normal turn you can watch, in that project's context. Returns at once. |
+| `sessions_list` | Open chats on every machine: machine, profile, idle/working, project@branch or folder, service chat mark, title, last message. Unreachable machines are listed too. |
+| `session_send(project=..., text)` | Hands a task to the open chat of that project (or `session=<id>` for a given chat). It runs there as a normal turn you can watch. Returns at once. |
 | `session_reply(id, text)` | The receiving chat's answer; it arrives in the sender's chat as a separate message. |
 
 A closed target chat is reported as not delivered; a task that already passed 3 chats is not
@@ -69,7 +69,7 @@ Only chats the gateway serves are listed (TUI and desktop chats), never one-off 
 answer arrives later in your chat (`a2a_task` shows the state). Prefer it to `a2a_call` for anything
 longer than a few minutes: Hermes cuts every tool call at `timeouts.tools.sequential_call` (420 s by
 default), and a blocking `a2a_call` loses the answer. Those peer sessions are hidden from you, so
-prefer `session_send` when a chat already works on the project.
+use `a2a_send` for machine tasks and `session_send(project=...)` for project work.
 
 ### Feed and approvals
 
@@ -177,6 +177,20 @@ doctor` per profile.
   only once it accepts them; when `doctor` shows every machine on fleet tokens, `fleet prune` drops the
   old ones.
 - One secret means one leaked machine exposes the fleet; rotate by removing it and re-inviting the others.
+
+### Which chat gets what
+
+A chat's **project** is the git repo of its working folder (origin repo name, else the folder name;
+worktrees count as their repo). The rules are enforced by plugin code on both machines:
+
+| Message | Goes to |
+|---|---|
+| Project task (`session_send(project="growser", ...)`) | The open chat of that project. None open: "not delivered". Several: the sender picks one. |
+| Task from a project chat | Only chats of the same project, or the service chat. |
+| Machine task (update, logs, restart) | The service chat (`hermes-...`) or `a2a_send`. |
+| A2A notices, approval requests | Only the service chat. |
+
+A chat that is neither a project chat nor the service chat takes no tasks.
 
 ## Troubleshooting
 

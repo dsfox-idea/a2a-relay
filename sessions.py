@@ -74,7 +74,8 @@ class LocalSessions:
             try:
                 cwd = str(raw.get("cwd") or "")
                 repo, branch = _git(cwd)
-                cards.append({"machine": self._machine(), "cwd": cwd, "repo": repo, "branch": branch, **{
+                cards.append({"machine": self._machine(), "cwd": cwd, "repo": repo, "branch": branch,
+                              "project": project_of(cwd) if repo else "", **{
                     k: raw.get(k, "") for k in ("id", "session_key", "title", "profile", "source", "status", "model",
                                                 "started_at", "last_active", "preview")}})
             except Exception:
@@ -247,6 +248,59 @@ def _git(cwd: str) -> tuple[str, str]:
         return (Path(root).name, git_probe.branch(cwd)) if root else ("", "")
     except Exception:
         return "", ""
+
+
+_PROJECTS: dict[str, str] = {}
+
+
+def project_name(origin_url: str, root: str) -> str:
+    """The project of a checkout (#17): the repo name of its origin, else the main checkout's folder name.
+    Linked worktrees fold into their repo, so ``a2a/<job>`` worktrees keep the project."""
+    url = (origin_url or "").strip().rstrip("/")
+    name = url.replace(":", "/").rsplit("/", 1)[-1] if url else Path(root or "").name
+    if name.endswith(".git"):
+        name = name[:-4]
+    return name.strip().lower()
+
+
+def project_of(cwd: str) -> str:
+    """The project of the chat working in ``cwd`` ("" outside a repo); positives are cached per process."""
+    if not cwd:
+        return ""
+    if cwd in _PROJECTS:
+        return _PROJECTS[cwd]
+    try:
+        from tui_gateway import git_probe
+        root = git_probe.common_repo_root(cwd)
+        if not root:
+            return ""
+        name = project_name(git_probe.run_git(cwd, "remote", "get-url", "origin"), root)
+    except Exception:
+        return ""
+    if name:
+        _PROJECTS[cwd] = name
+    return name
+
+
+def is_service_card(card: dict) -> bool:
+    from .feed import is_service_title
+    return is_service_title(card.get("title"))
+
+
+def admits(card: dict, from_project: str) -> Optional[str]:
+    """None when the target chat may take a task from a chat of ``from_project``, else why not (#17):
+    the service chat (title hermes-...) takes any task; a project chat only its own project's; any other
+    chat none, since machine tasks belong to the service chat."""
+    if is_service_card(card):
+        return None
+    project = str(card.get("project") or "")
+    if not project:
+        return "this chat is neither a project chat nor the service chat (title hermes-...)"
+    if (from_project or "") != project:
+        sender = f"project {from_project}" if from_project else "a chat outside any project"
+        return (f"chat of project {project} takes tasks only from chats of project {project}; this task comes from "
+                f"{sender}. Send machine tasks to the service chat (title hermes-...)")
+    return None
 
 
 class FleetAuth:
@@ -432,7 +486,7 @@ class SessionDirectory:
         def keep(card: dict) -> bool:
             if machine and card.get("machine") != machine:
                 return False
-            if repo and repo.lower() not in str(card.get("repo", "")).lower():
+            if repo and not any(repo.lower() in str(card.get(k) or "").lower() for k in ("project", "repo")):
                 return False
             if profile and card.get("profile") != profile:
                 return False
@@ -449,7 +503,10 @@ class SessionDirectory:
         lines = [f"Open sessions: {len(chosen)}" + (f" of {len(cards)}" if len(chosen) != len(cards) else "")]
         for c in chosen:
             ago = max(0, int(now - float(c.get("last_active") or now)))
-            where = f"{c.get('repo')}@{c.get('branch')}" if c.get("repo") else (c.get("cwd") or "-")
+            where = (f"project {c.get('project') or c.get('repo')}@{c.get('branch')}" if c.get("repo")
+                     else (c.get("cwd") or "-"))
+            if is_service_card(c):
+                where = "service chat | " + where
             lines.append(f"- {c.get('machine')} | {c.get('profile')} | {c.get('status')} | {ago // 60} min ago | "
                          f"{where} | \"{c.get('title') or '(untitled)'}\" | session {c.get('session_key')}"
                          + (f"\n  last: {c.get('preview')}" if c.get("preview") else ""))

@@ -163,8 +163,9 @@ def _register_tools(ctx, a2a_send, a2a_task, gateway_restart) -> None:
     text = lambda description: {"type": "string", "description": description}  # noqa: E731
     send_doc = ("Hand a task to a peer agent WITHOUT waiting: returns a job id at once, and the peer's answer "
                 "arrives later in this chat as a separate message. Use it for anything that may take longer "
-                "than a few minutes (builds, test runs, investigations); a2a_call blocks and is cut at the "
-                "tool timeout (420 s by default), losing the answer.")
+                "than a few minutes; a2a_call blocks and is cut at the tool timeout (420 s by default), losing "
+                "the answer. It runs in a hidden session of the peer: use it for machine tasks (plugin update, "
+                "logs, restart). Project work goes to that project's open chat with session_send(project=...).")
     ctx.register_tool(name="a2a_send", toolset="a2a-relay", handler=a2a_send, description=send_doc, emoji="\U0001f4e8",
                       schema=schema("a2a_send", send_doc,
                                     {"agent": text("Configured peer name (from a2a_agents) or a full http(s):// URL."),
@@ -268,7 +269,7 @@ def _register_mail(ctx, chats: OwnerChats, inject, profile_home):
     def session_send(args: dict, session_id: str = "", **_) -> str:
         return mail.send(chats.key_for_session(session_id), session_id, _profile_name(str(profile_home())),
                          str(args.get("session") or ""), str(args.get("text") or ""),
-                         machine=str(args.get("machine") or ""))
+                         machine=str(args.get("machine") or ""), project=str(args.get("project") or ""))
 
     def session_reply(args: dict, session_id: str = "", **_) -> str:
         key = chats.key_for_session(session_id)
@@ -276,16 +277,20 @@ def _register_mail(ctx, chats: OwnerChats, inject, profile_home):
             return "Error: session_reply works only in the owner chat that received the task."
         return mail.reply(key, str(args.get("id") or ""), str(args.get("text") or ""))
 
-    send_doc = ("Hand a task to an OPEN owner chat on any fleet machine (find it with sessions_list): it runs there "
-                "in a chat the owner sees, in that project's context, and its agent answers with session_reply; the "
-                "answer arrives in THIS chat as a separate message. Returns at once; do not wait. Prefer it to "
-                "a2a_send when a chat already works on the project. A busy chat starts it after its current turn.")
+    send_doc = ("Hand a task to an OPEN owner chat on any fleet machine: it runs there in a chat the owner sees and "
+                "its agent answers with session_reply; the answer arrives in THIS chat as a separate message. Returns "
+                "at once; do not wait. Project work: pass 'project' (the git repo name) and the open chat of that "
+                "project is found. A project chat takes tasks only from chats of the same project, so a project "
+                "chat never sends work outside its project. Machine tasks (plugin update, logs, restart) go to "
+                "the service chat (title hermes-..., pass its id as 'session') or with a2a_send. A busy chat "
+                "starts the task after its current turn.")
     ctx.register_tool(name="session_send", toolset="a2a-relay", handler=session_send, description=send_doc,
                       emoji="\U0001f4ec", schema=_schema("session_send", send_doc, {
-                          "session": text("Target chat: its session id from sessions_list (or a unique tail)."),
+                          "project": text("Target project (git repo name, e.g. growser): its open chat gets it."),
+                          "session": text("Or the target chat's session id from sessions_list (or a unique tail)."),
                           "text": text("The task, self-contained: the other chat knows nothing of this one."),
                           "machine": text("Optional: that chat's machine (A2A node name), to disambiguate."),
-                      }, ["session", "text"]))
+                      }, ["text"]))
     reply_doc = ("Answer a task another chat sent here with session_send (its message names the id): one message "
                  "with the result, or why it cannot be done. Only the chat that received the task can answer it.")
     ctx.register_tool(name="session_reply", toolset="a2a-relay", handler=session_reply, description=reply_doc,
