@@ -1,10 +1,8 @@
-"""a2a-relay: mirror inbound A2A traffic into the active TUI chat and route A2A approval prompts
-to the user.
+"""a2a-relay: A2A between the owner's machines, routed to the chats the owner sees.
 
-Two processes share ``$HERMES_HOME/a2a_relay/``:
-* the messaging gateway (serves inbound A2A) publishes approval prompts and applies decisions;
-* the Ink TUI process injects feed messages into the most recently active chat and owns the
-  ``/a2a-allow``, ``/a2a-deny`` and ``/a2a-pending`` commands.
+The gateway process serves inbound A2A, publishes approval prompts and applies decisions; its feed
+posts A2A notices and approval prompts only into the machine's service chat (the open chat titled
+``hermes-...``, #17). ``session_send`` delivers project work into a specific open chat.
 """
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ from .approvals import ALLOW, DENY, ApprovalBridge, DecisionDesk
 from .chats import OwnerChats
 from .cli import build_parser, command as cli_command
 from .coder_tools import CodingTools
-from .feed import FeedRelay, owner_chat_alive
+from .feed import FeedRelay, ServiceChat, owner_chat_alive
 from .hold import ForwardGuard, TaskHold, forwarded_context_id, is_approved_in, level_note
 from .identity import SECTION_ID, MachineIdentity
 from .jobs import JobBoard
@@ -66,7 +64,8 @@ def register(ctx) -> None:
         gate.auto_decision(command, keys) if current_session_is_a2a() else None))
     desk = DecisionDesk(paths)
     replies = ReplyInterpreter(desk)
-    feed = FeedRelay(paths, inject=inject, can_inject=chats.can_inject, on_asked=replies.note_asked)
+    feed = FeedRelay(paths, inject=inject, can_inject=chats.can_inject, on_asked=replies.note_asked,
+                     target=_service_chat(ctx, profile_home).key)
     mail = _register_mail(ctx, chats, inject, profile_home)
 
     def on_pre_llm_call(user_message=None, platform: str = "", session_id: str = "", **_):
@@ -77,11 +76,13 @@ def register(ctx) -> None:
         if not key:
             return None
         chats.remember(session_id, key)
-        feed.claim_chat(key)
-        _ensure_poller(feed)
         text = user_message if isinstance(user_message, str) else ""
-        feed.note_turn(text)  # the relay's own turn: its prompts are on screen now
-        context = mail.on_turn(session_id, key, text) or replies.on_user_message(text)
+        in_service_chat = key == feed.session_key
+        if in_service_chat:
+            feed.note_turn(text)  # the relay's own turn: its prompts are on screen now
+        context = mail.on_turn(session_id, key, text)
+        if not context and in_service_chat:
+            context = replies.on_user_message(text)  # a yes/no counts only where the prompt was shown
         return {"context": context} if context else None
 
     def on_pre_tool_call(tool_name: str = "", session_id: str = "", args=None, **_):
@@ -127,6 +128,7 @@ def register(ctx) -> None:
     coding.register(ctx, _schema)
     coding.reconcile_in_background()
     restarter.announce_in_background()
+    _start_feed_when_gateway(feed)
     ctx.register_cli_command(name="a2a-relay", help="Check and set up A2A between your machines",
                              setup_fn=build_parser, handler_fn=cli_command,
                              description="doctor: read-only checks with exact fix commands; setup: apply them.")
@@ -137,31 +139,15 @@ def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("pre_gateway_dispatch", hold.on_pre_gateway_dispatch)
     ctx.register_hook("post_tool_call", on_post_tool_call)
-    def claim_chat() -> None:
-        """Typing any /a2a-* command makes this chat the feed target, even before its first turn."""
-        try:
-            from gateway.session_context import get_session_env
-            # The TUI binds only ``source`` (not ``platform``) around slash-command handlers.
-            platform = get_session_env("HERMES_SESSION_PLATFORM", "") or get_session_env("HERMES_SESSION_SOURCE", "")
-            key = chats.key_for_turn(platform, get_session_env("HERMES_SESSION_KEY", ""))
-            if key:
-                feed.claim_chat(key)
-                _ensure_poller(feed)
-        except Exception:
-            logger.warning("a2a-relay: could not claim the chat from a slash command", exc_info=True)
-
     def command(fn):
-        def handler(raw: str) -> str:
-            claim_chat()
-            return fn(raw)
-        return handler
+        return fn
 
     ctx.register_command("a2a-allow", handler=command(lambda raw: desk.decide(raw, ALLOW)), args_hint="[id]",
                          description="Approve a pending A2A request")
     ctx.register_command("a2a-deny", handler=command(lambda raw: desk.decide(raw, DENY)),
                          args_hint="[id] [reason]", description="Deny a pending A2A request")
     ctx.register_command("a2a-pending", handler=command(lambda raw: desk.describe_pending()),
-                         description="List A2A requests waiting for your decision; makes this chat the A2A feed")
+                         description="List A2A requests waiting for your decision")
     ctx.register_command("a2a-trust", handler=command(trust_command.handle), args_hint="[level|allow <glob>]",
                          description="Show or set this profile's A2A trust level (0 = most autonomous, strict)")
     logger.info("a2a-relay: registered (state in %s)", paths.root)
@@ -338,6 +324,31 @@ def _sweep_forever(mail, every: float = 60.0) -> None:
             mail.sweep()
         except Exception:
             logger.warning("a2a-relay: mail sweep failed", exc_info=True)
+
+
+def _service_chat(ctx, profile_home) -> ServiceChat:
+    """#17: this profile's service chat, the open chat titled ``hermes-...``. The plugin can inject only into its
+    own profile's sessions, so each profile needs its own."""
+    from pathlib import Path
+    from .sessions import LocalSessions, _profile_name
+    profile = _profile_name(str(getattr(ctx._manager, "home_path", None) or profile_home()))
+    local = LocalSessions(lambda: "")
+    return ServiceChat(lambda: [c for c in local.cards() if c.get("profile") == profile])
+
+
+def _start_feed_when_gateway(feed: FeedRelay, tries: int = 120, every: float = 1.0) -> None:
+    """The feed no longer waits for an owner turn to claim a chat: the gateway process polls from start."""
+    from .restart import _gateway_runner
+
+    def wait() -> None:
+        import time
+        for _ in range(tries):
+            if _gateway_runner() is not None:
+                _ensure_poller(feed)
+                return
+            time.sleep(every)
+
+    threading.Thread(target=wait, daemon=True, name="a2a-relay-feed-start").start()
 
 
 def _ensure_poller(feed: FeedRelay) -> None:

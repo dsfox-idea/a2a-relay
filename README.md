@@ -42,7 +42,10 @@ listens on port 9900, a2a-relay on 9901. Allow TCP 9900 and 9901 between them in
    hermes a2a-relay doctor              # read-only; every failed check prints the command that fixes it
    ```
 
-4. **Try it** in a chat on win: "list my open chats on all machines" (`sessions_list`), then "ask the
+4. **Open a service chat** on each machine and title it with the `hermes-` prefix (`/title hermes-win`).
+   A2A notices and approval requests of that machine go only there.
+
+5. **Try it** in a chat on win: "list my open chats on all machines" (`sessions_list`), then "ask the
    chat on mac that works on project X to run its tests" (`session_send`). The task appears in that
    chat on mac, and its answer comes back to your chat on win.
 
@@ -71,8 +74,11 @@ prefer `session_send` when a chat already works on the project.
 ### Feed and approvals
 
 Inbound A2A tasks, the replies sent back and calls made from other sessions are posted as one notice
-into your most recently active chat on that machine (a task and its reply are merged; history is not
-replayed). When a peer's task needs approval, the request is posted there at once. Without this plugin
+into the machine's **service chat**: the open chat whose title starts with `hermes-` (set it with
+`/title hermes-<machine>`; with several, the most recently active one). A task and its reply are merged;
+history is not replayed. When a peer's task needs approval, the request is posted there at once.
+Project chats never receive these notices. With no service chat open, everything waits (`/a2a-pending`
+lists it) until you open one; a task that needs your "yes" is declined at once, since nobody can see it. Without this plugin
 such a prompt goes nowhere: the A2A adapter drops it and the command is denied after
 `approvals.timeout` with nobody asked.
 
@@ -86,8 +92,6 @@ or expired. With several requests waiting, use the commands:
 | `/a2a-pending` | requests waiting for you |
 | `/a2a-allow [id]`, `/a2a-deny [id] [reason]` | decide one |
 | `/a2a-trust` | show or set this profile's trust level and allow-list |
-
-Any of them also makes the current chat the feed target.
 
 ### Trust levels
 
@@ -178,8 +182,8 @@ doctor` per profile.
 
 | Symptom | Cause and fix |
 |---|---|
-| A peer's task waits and you never saw a request | Requests go to your most recently active chat on that machine. Type `/a2a-pending` in the chat you use: it lists them and makes that chat the feed target. |
-| "yes" did nothing | The request had expired (5 min by default), or several requests wait: use `/a2a-allow <id>`. |
+| A peer's task waits and you never saw a request | Requests go only to the service chat. Open a chat and title it `hermes-<machine>` (`/title hermes-m5`); `/a2a-pending` lists what waits. |
+| "yes" did nothing | A plain yes counts only in the service chat, and only while the request is open (5 min by default); with several waiting use `/a2a-allow <id>`. |
 | `sessions_list` says a machine is not reachable | Its gateway is down, it runs an older plugin, or TCP 9901 is blocked. `curl http://<ip>:9901/sessions` should answer 401 (no token). |
 | A chat is missing from `sessions_list` | Only chats the gateway serves are listed; `hermes chat -q` runs and closed chats are not. |
 | The first `code_send` on a new machine fails with "acpx could not open session" | npm was still fetching the adapter. Retry, or warm the cache once: `npm exec --yes --package=@agentclientprotocol/claude-agent-acp@^0.81.2 -- node -e 0`. |

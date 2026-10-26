@@ -1,5 +1,5 @@
-"""Feed side of the relay (TUI process): turns new A2A audit records and approval prompts into
-one injected chat message per batch, delivered into the most recently active TUI chat."""
+"""Feed side of the relay: turns new A2A audit records and approval prompts into one injected chat
+message per batch, delivered only into the machine's service chat (title ``hermes-...``, #17)."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def _pid_alive_windows(pid: int) -> bool:
 
 
 def owner_chat_alive(paths: RelayPaths) -> bool:
-    """True when the process that owns the feed (the owner's last active chat) is still running."""
+    """True when the feed has a chat (the service chat) and the process serving it is running."""
     with SharedState(paths).locked() as state:
         owner = state.get("owner") or {}
     pid = owner.get("pid")
@@ -69,12 +69,48 @@ def _short(text: str, limit: int = 500) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+SERVICE_PREFIX = "hermes-"
+
+
+def is_service_title(title) -> bool:
+    return str(title or "").strip().lower().startswith(SERVICE_PREFIX)
+
+
+class ServiceChat:
+    """The machine's service chat (#17): the open owner chat whose title starts with ``hermes-``; with several,
+    the most recently active one. The feed and approval prompts go only there, never to whatever chat the
+    owner typed in last. Re-read every ``ttl`` seconds (a listing reads state.db)."""
+
+    def __init__(self, chats: Callable[[], list], clock: Callable[[], float] = time.monotonic, ttl: float = 5.0):
+        self._chats = chats
+        self._clock = clock
+        self._ttl = ttl
+        self._at: Optional[float] = None
+        self._key = ""
+
+    def key(self) -> str:
+        now = self._clock()
+        if self._at is not None and now - self._at < self._ttl:
+            return self._key
+        self._at = now
+        try:
+            candidates = [c for c in self._chats() if is_service_title(c.get("title"))]
+        except Exception:
+            logger.warning("a2a-relay: could not look up the service chat", exc_info=True)
+            return self._key
+        best = max(candidates, key=lambda c: float(c.get("last_active") or 0), default=None)
+        self._key = str((best or {}).get("session_key") or "")
+        return self._key
+
+
 class FeedRelay:
-    """One instance per process; only the process owning the most recently active owner chat claims records."""
+    """One instance per process. With a ``target`` (the gateway process), records go to the service chat it
+    names and wait while there is none; ``claim_chat`` sets the chat by hand (tests)."""
 
     def __init__(self, paths: RelayPaths, inject: Callable[[str, str], bool], can_inject: Callable[[], bool],
                  clock: Callable[[], float] = time.time, pid: Optional[int] = None,
-                 on_asked: Optional[Callable[[list], None]] = None):
+                 on_asked: Optional[Callable[[list], None]] = None, target: Optional[Callable[[], str]] = None):
+        self.target = target
         self._paths = paths
         self._state = SharedState(paths)
         self._inject = inject
@@ -104,6 +140,26 @@ class FeedRelay:
         with self._state.locked() as state:
             state["owner"] = {"pid": self._pid, "session_key": session_key, "ts": self._clock()}
 
+    @property
+    def session_key(self) -> str:
+        with self._lock:
+            return self._session_key
+
+    def _follow_target(self) -> None:
+        key = self.target() if self.target is not None else None
+        if key is None or key == self.session_key:
+            return
+        if key:
+            logger.info("a2a-relay: service chat is now %s", key)
+            self.claim_chat(key)
+            return
+        logger.info("a2a-relay: no service chat open; A2A events wait (titles starting with %r)", SERVICE_PREFIX)
+        with self._lock:
+            self._session_key = ""
+        with self._state.locked() as state:
+            if (state.get("owner") or {}).get("pid") == self._pid:
+                state["owner"] = {}
+
     def note_own_call(self, started: bool) -> None:
         """An a2a_* tool call from this chat is in flight: its audit record is already visible here."""
         with self._lock:
@@ -121,6 +177,7 @@ class FeedRelay:
         """Claim new records if this process owns the feed, flush when due. True when a message was injected."""
         if not self._can_inject():
             return False
+        self._follow_target()
         with self._lock:
             session_key = self._session_key
         if session_key:

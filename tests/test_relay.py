@@ -210,6 +210,70 @@ class FeedTests(unittest.TestCase):
         self.assertFalse(gateway_feed.poll_once())
 
 
+class ServiceChatTests(unittest.TestCase):
+    """#17: the feed goes only to the chat titled hermes-..., never to the chat the owner typed in last."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.paths = store.RelayPaths(root / "relay", audit=root / "a2a_audit.jsonl")
+        self.paths.ensure()
+        self.sent = []
+        self.clock = Clock()
+        self.chats = [{"session_key": "growser", "title": "Продолжить работу над #347", "last_active": 9}]
+        self.service = feed_mod.ServiceChat(lambda: list(self.chats), clock=lambda: self.clock.now, ttl=0)
+        self.feed = feed_mod.FeedRelay(self.paths, inject=lambda k, t: self.sent.append((k, t)) or True,
+                                       can_inject=lambda: True, clock=self.clock, pid=os.getpid(),
+                                       target=self.service.key)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def approval(self, rid):
+        _append(self.paths.approvals, {"type": "request", "request_id": rid, "peer": "m5", "command": "c",
+                                       "ts": self.clock.now, "expires_at": self.clock.now + 300})
+
+    def test_without_a_service_chat_events_wait(self):
+        self.assertFalse(self.feed.poll_once())
+        self.approval("r1")
+        self.assertFalse(self.feed.poll_once())
+        self.assertEqual(self.sent, [], "nothing may land in the project chat")
+        self.assertFalse(feed_mod.owner_chat_alive(self.paths))
+
+    def test_events_go_to_the_service_chat_once_it_opens(self):
+        self.feed.poll_once()  # no service chat yet
+        self.approval("r1")
+        self.feed.poll_once()
+        self.chats.append({"session_key": "svc", "title": "Hermes-win", "last_active": 1})
+        self.feed.poll_once()  # first claim: offsets start here
+        self.approval("r2")
+        self.assertTrue(self.feed.poll_once())
+        self.assertEqual([k for k, _ in self.sent], ["svc"])
+        self.assertIn("r2"[:8], self.sent[0][1])
+
+    def test_the_most_recently_active_service_chat_wins_and_closing_it_stops_the_feed(self):
+        self.chats += [{"session_key": "old", "title": "hermes-a", "last_active": 1},
+                       {"session_key": "new", "title": "hermes-b", "last_active": 5}]
+        self.assertEqual(self.service.key(), "new")
+        self.feed.poll_once()
+        self.assertEqual(self.feed.session_key, "new")
+        self.chats[:] = [c for c in self.chats if not c["title"].startswith("hermes-")]
+        self.feed.poll_once()
+        self.assertEqual(self.feed.session_key, "")
+        self.assertFalse(feed_mod.owner_chat_alive(self.paths))
+
+    def test_title_check(self):
+        self.assertTrue(feed_mod.is_service_title("  HERMES-m5 "))
+        for title in ("", None, "hermes", "my hermes-chat", "Продолжить"):
+            self.assertFalse(feed_mod.is_service_title(title), title)
+
+    def test_a_broken_listing_keeps_the_last_chat(self):
+        self.chats.append({"session_key": "svc", "title": "hermes-x"})
+        self.assertEqual(self.service.key(), "svc")
+        self.service._chats = lambda: (_ for _ in ()).throw(RuntimeError("x"))
+        self.assertEqual(self.service.key(), "svc")
+
+
 class _Ctx:
     """Minimal PluginContext double: records hooks/commands, injection always accepted."""
 
@@ -264,31 +328,30 @@ class RegisterTests(unittest.TestCase):
         finally:
             clear_session_vars(tokens)
 
-    def test_slash_command_claims_tui_chat(self):
+    # #17: typing in a chat no longer makes it the feed target; only the hermes-... service chat is.
+    def test_slash_command_does_not_claim_the_chat(self):
         from gateway.session_context import clear_session_vars, set_session_vars
         ctx = _Ctx(tui_host=True, gateway_host=False)
         pkg.register(ctx)
-        # Same binding as tui_gateway.server._set_session_context: source, no platform.
         tokens = set_session_vars(session_key="20261017_x", session_id="20261017_x", source="tui")
         try:
             ctx.commands["a2a-pending"]("")
         finally:
             clear_session_vars(tokens)
-        self.assertEqual(self._owner(), "20261017_x")
+        self.assertIsNone(self._owner())
 
-    def test_tui_turn_claims_by_session_id(self):
+    def test_tui_turn_does_not_claim_the_chat(self):
         ctx = _Ctx(tui_host=True, gateway_host=False)
         pkg.register(ctx)
         self._turn(ctx, "tui", "20261018_tui")
-        self.assertEqual(self._owner(), "20261018_tui")
+        self.assertIsNone(self._owner())
 
-    def test_gateway_local_chat_claims_by_gateway_session_key(self):
-        # Windows: the gateway serves the TUI chat; the agent says "tui", the session context says "local".
+    def test_gateway_local_chat_turn_does_not_claim_the_chat(self):
         ctx = _Ctx(tui_host=False, gateway_host=True)
         pkg.register(ctx)
         key = "agent:main:local:dm:local-a053"
         self._turn(ctx, "tui", "local-a053", platform="local", session_key=key)
-        self.assertEqual(self._owner(), key)
+        self.assertIsNone(self._owner())
 
     def test_gateway_a2a_and_messaging_sessions_are_never_claimed(self):
         ctx = _Ctx(tui_host=False, gateway_host=True)
