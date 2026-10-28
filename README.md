@@ -69,7 +69,9 @@ Only chats the gateway serves are listed (TUI and desktop chats), never one-off 
 answer arrives later in your chat (`a2a_task` shows the state). Prefer it to `a2a_call` for anything
 longer than a few minutes: Hermes cuts every tool call at `timeouts.tools.sequential_call` (420 s by
 default), and a blocking `a2a_call` loses the answer. Those peer sessions are hidden from you, so
-use `a2a_send` for machine tasks and `session_send(project=...)` for project work.
+use `a2a_send` for machine tasks and `session_send(project=...)` for project work. A project chat
+(its folder is a git repo) cannot call `a2a_send`, `a2a_call` or `a2a_orchestrate` at all: the
+plugin refuses them and points to `session_send(project=...)`.
 
 ### Feed and approvals
 

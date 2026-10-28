@@ -57,6 +57,32 @@ class LocalSessionsTests(unittest.TestCase):
         self.assertEqual(sessions._profile_name("C:/Users/x/AppData/Local/hermes"), "default")
 
 
+class ProjectForwardGuardTests(unittest.TestCase):
+    """#17 part 5: project work never goes from a project chat into a hidden peer session."""
+
+    def guard(self, project, cwd="A:/dev/growser"):
+        return sessions.ProjectForwardGuard(lambda: cwd, lambda path: project if path else "")
+
+    def test_hidden_forwards_from_a_project_chat_are_refused_with_the_session_send_hint(self):
+        for tool in ("a2a_send", "a2a_call", "a2a_orchestrate"):
+            refusal = self.guard("growser").refusal(tool)
+            self.assertIn("project growser", refusal)
+            self.assertIn('session_send(project="growser")', refusal)
+
+    def test_a_chat_outside_any_repo_may_forward(self):
+        self.assertIsNone(self.guard("", cwd="A:/dev/hermes").refusal("a2a_send"))
+        self.assertIsNone(self.guard("growser", cwd="").refusal("a2a_call"))
+
+    def test_other_tools_pass_in_a_project_chat(self):
+        for tool in ("session_send", "session_reply", "sessions_list", "a2a_task", "terminal"):
+            self.assertIsNone(self.guard("growser").refusal(tool))
+
+    def test_a_failing_project_probe_does_not_block(self):
+        def broken(_):
+            raise OSError("git missing")
+        self.assertIsNone(sessions.ProjectForwardGuard(lambda: "A:/dev/x", broken).refusal("a2a_send"))
+
+
 class GuardTests(unittest.TestCase):
     def test_one_server_per_process_across_plugin_copies(self):
         self.assertIs(sessions._process_guard(), sessions._process_guard())

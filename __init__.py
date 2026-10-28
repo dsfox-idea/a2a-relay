@@ -14,7 +14,7 @@ from .approvals import ALLOW, DENY, ApprovalBridge, DecisionDesk, A2A_SESSION_MA
 from .chats import OwnerChats
 from .consent import ChatConsent
 from .cli import build_parser, command as cli_command
-from .coder_tools import CodingTools
+from .coder_tools import CodingTools, _session_cwd as session_cwd
 from .feed import FeedRelay, ServiceChat, owner_chat_alive
 from .hold import ForwardGuard, TaskHold, forwarded_context_id, is_approved_in, level_note
 from .identity import SECTION_ID, MachineIdentity
@@ -22,6 +22,7 @@ from .i18n import is_relay_text
 from .jobs import JobBoard
 from .replies import ReplyInterpreter, parse_answer
 from .restart import GatewayRestart
+from .sessions import ProjectForwardGuard
 from .store import RelayPaths
 from .trust import CommandRules, TaskGrants, TrustCommand, TrustGate, TrustPolicy, current_session_is_a2a
 
@@ -81,6 +82,7 @@ def register(ctx) -> None:
     mail = _register_mail(ctx, chats, inject, profile_home, grants,
                           owner_said_yes=lambda sid: (parse_answer(last_owner_text.get(sid, "")) or ("",))[0] == ALLOW)
     _longer_peer_approvals(lambda: current_session_is_a2a() or bool(task_for_key(_current_session_key())))
+    project_guard = ProjectForwardGuard(session_cwd)
 
     def on_pre_llm_call(user_message=None, platform: str = "", session_id: str = "", conversation_history=None,
                         **_):
@@ -105,6 +107,11 @@ def register(ctx) -> None:
 
     def on_pre_tool_call(tool_name: str = "", session_id: str = "", args=None, **_):
         owner = chats.is_owner_session(session_id)
+        in_service_chat = owner and chats.key_for_session(session_id) == feed.session_key
+        refusal = project_guard.refusal(tool_name) if owner and not in_service_chat else None
+        if refusal:
+            logger.info("a2a-relay: %s refused in project chat %s", tool_name, session_id)
+            return {"action": "block", "message": refusal}
         if tool_name in _A2A_TOOLS and owner:
             feed.note_own_call(True)
         peer_turn = mail.turns.get(session_id) if owner else None

@@ -216,6 +216,34 @@ def admits(card: dict, from_project: str) -> Optional[str]:
     return None
 
 
+class ProjectForwardGuard:
+    """Project work never leaves a project chat through a hidden peer session (#17 part 5): from an owner
+    chat inside a repo, a2a_send / a2a_call / a2a_orchestrate (incl. /<profile>/ routes) are refused, so the
+    work goes to an open chat of the project with session_send(project=...)."""
+
+    TOOLS = frozenset({"a2a_send", "a2a_call", "a2a_orchestrate"})
+
+    def __init__(self, session_cwd: Callable[[], str], project: Callable[[str], str] = project_of):
+        self._session_cwd = session_cwd
+        self._project = project
+
+    def refusal(self, tool_name: str) -> Optional[str]:
+        if tool_name not in self.TOOLS:
+            return None
+        try:
+            project = self._project(self._session_cwd())
+        except Exception:
+            logger.debug("a2a-relay: no project for the calling chat", exc_info=True)
+            return None
+        if not project:
+            return None
+        return (f"Refused: this chat works on project {project}, and {tool_name} runs in a hidden session of the "
+                f"peer that the owner does not see. Send project work to an open chat of the project with "
+                f"session_send(project=\"{project}\"); if none is open, ask the owner to open one. Machine tasks "
+                f"(plugin update, logs, restart) go to the peer's service chat (title hermes-...) with "
+                f"session_send(session=...).")
+
+
 class FleetAuth:
     """Which fleet member, if any, a bearer token belongs to (read per request: tokens follow ``fleet sync``)."""
 

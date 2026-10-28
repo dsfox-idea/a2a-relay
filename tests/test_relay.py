@@ -30,6 +30,7 @@ pkg = _load_package()
 store = sys.modules["a2a_relay_under_test.store"]
 feed_mod = sys.modules["a2a_relay_under_test.feed"]
 approvals = sys.modules["a2a_relay_under_test.approvals"]
+sessions_mod = sys.modules["a2a_relay_under_test.sessions"]
 
 
 def _append(path: Path, rec: dict) -> None:
@@ -378,6 +379,27 @@ class RegisterTests(unittest.TestCase):
         self.assertEqual(feed._own_calls, 1)
         ctx.hooks["post_tool_call"](tool_name="a2a_call", session_id="local-a053")
         self.assertEqual(feed._own_calls, 0)
+
+    def test_project_chat_cannot_hand_work_to_a_hidden_peer_session(self):
+        ctx = _Ctx(tui_host=False, gateway_host=True)
+        pkg.register(ctx)
+        guard = next(c.cell_contents for c in ctx.hooks["pre_tool_call"].__closure__
+                     if isinstance(c.cell_contents, sessions_mod.ProjectForwardGuard))
+        guard._session_cwd = lambda: "A:/dev/growser"
+        guard._project = lambda cwd: "growser" if cwd else ""
+        self._turn(ctx, "tui", "local-g1", platform="local", session_key="agent:main:local:dm:local-g1")
+        verdict = ctx.hooks["pre_tool_call"](tool_name="a2a_send", session_id="local-g1",
+                                             args={"agent": "m4-growser", "message": "build"})
+        self.assertEqual(verdict["action"], "block")
+        self.assertIn('session_send(project="growser")', verdict["message"])
+        # A peer's hidden A2A session is not an owner chat: the guard does not apply there.
+        self.assertIsNone(ctx.hooks["pre_tool_call"](tool_name="a2a_send", session_id="agent-a2a-session"))
+        # The service chat sends machine tasks with a2a_send even when its folder is a repo.
+        feed = next(c.cell_contents for c in ctx.hooks["pre_tool_call"].__closure__
+                    if isinstance(c.cell_contents, feed_mod.FeedRelay))
+        feed._session_key = "agent:main:local:dm:local-g1"
+        self.assertIsNone(ctx.hooks["pre_tool_call"](tool_name="a2a_send", session_id="local-g1",
+                                                     args={"agent": "m4", "message": "version?"}))
 
 
 class IdentityTests(unittest.TestCase):
